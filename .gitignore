@@ -111,6 +111,11 @@ coverage/
 secrets/
 credentials.json
 
+# ── TypeScript build output ──────────────────────────────────────────────────
+# Cloud Functions are compiled into lib/ at deploy time from src/.
+backend/functions/lib/
+*.tsbuildinfo
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Why `pubspec.lock` IS committed (and `ios/Podfile.lock` too)
 #
