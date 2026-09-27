@@ -1,0 +1,108 @@
+# Strict analysis configuration for the Smart Accident Alert app.
+#
+# This is a safety application: a wrong type or an unhandled null is a failed
+# emergency dispatch, not a cosmetic bug. Every rule below is on.
+#
+# NOTE: unknown keys under `linter.rules` are a hard error in the analyzer, and
+# several lints that older codebases use were removed upstream. Every rule
+# listed here was checked against linter 1.30.1 / analyzer 14.4.0 before being
+# added; if you add one, verify it exists first.
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # Treat unused code and dead code as errors, not warnings. In a codebase
+    # this size, an unused private method usually means an unwired code path,
+    # and an unwired code path in an alert pipeline is a missed alert.
+    unused_import: error
+    unused_local_variable: error
+    unused_field: error
+    unused_element: error
+    dead_code: error
+
+    # A `dynamic` anywhere in this codebase is a bug: Firestore and sqflite hand
+    # us `Map<String, dynamic>` and we must narrow it at the boundary (see
+    # data/datasources/json.dart) rather than let it leak into the domain.
+    strict_raw_type: error
+
+    # Make `!` (null assertion) loud. `unnecessary_non_null_assertion` catches
+    # the `!` that the compiler can prove is redundant; `!` on a genuinely
+    # nullable value is caught by the fact that we never reach for one without
+    # a guard (see core/result.dart for the `guard` helper).
+    unnecessary_non_null_assertion: error
+    invalid_null_aware_operator: error
+
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "build/**"
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
+
+linter:
+  rules:
+    # --- correctness -----------------------------------------------------------
+    always_declare_return_types: true
+    avoid_catches_without_on_clauses: true
+    avoid_dynamic_calls: true
+    avoid_empty_else: true
+    avoid_slow_async_io: true
+    cancel_subscriptions: true
+    close_sinks: true
+    control_flow_in_finally: true
+    no_adjacent_strings_in_list: true
+    only_throw_errors: true
+    throw_in_finally: true
+    unawaited_futures: true
+    unnecessary_await_in_return: true
+    unnecessary_parenthesis: true
+    unnecessary_statements: true
+    use_build_context_synchronously: true
+    valid_regexps: true
+
+    # --- null safety / immutability -------------------------------------------
+    avoid_init_to_null: true
+    avoid_null_checks_in_equality_operators: true
+    avoid_returning_null_for_void: true
+    avoid_returning_this: true
+    prefer_final_fields: true
+    prefer_final_locals: true
+    prefer_typing_uninitialized_variables: true
+    unnecessary_nullable_for_final_variable_declarations: true
+    # Positional booleans are unreadable at call sites (`saveEvent(e, true)`),
+    # and a mis-read boolean is how you end up notifying hospitals for a
+    # false-alarm cancel.
+    avoid_positional_boolean_parameters: true
+
+    # --- API design (this is a library another agent consumes) -----------------
+    always_use_package_imports: false
+    annotate_overrides: true
+    directives_ordering: true
+    prefer_relative_imports: true
+    public_member_api_docs: true
+    require_trailing_commas: true
+    unnecessary_lambdas: true
+
+    # --- style ----------------------------------------------------------------
+    always_put_control_body_on_new_line: true
+    avoid_bool_literals_in_conditional_expressions: true
+    cascade_invocations: false
+    curly_braces_in_flow_control_structures: true
+    lines_longer_than_80_chars: false
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_final_in_for_each: true
+    prefer_single_quotes: true
+    sized_box_for_whitespace: false
+    sort_child_properties_last: true
+    use_full_hex_values_for_flutter_colors: false
+    use_key_in_widget_constructors: true

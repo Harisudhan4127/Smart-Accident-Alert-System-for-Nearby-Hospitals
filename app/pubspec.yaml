@@ -1,0 +1,181 @@
+# Smart Accident Alert — Flutter application manifest.
+#
+# Architectural note (read this before adding a dependency):
+# ------------------------------------------------------------------
+# This project deliberately uses **hand-written immutable classes with `copyWith`**
+# instead of `freezed` + `build_runner`. Rationale:
+#   * The entity set is small and stable (see lib/domain/entities). A hand-written
+#     `copyWith` + `==`/`hashCode` is ~20 lines per class and needs no codegen step,
+#     so `flutter analyze` / `flutter test` work on a clean checkout with no
+#     `.dart_tool/build` warm-up and no build_runner version skew.
+#   * Codegen failure modes (`build_runner` cache corruption, freezed/json_serializable
+#     version conflicts) are a bad trade for a safety app whose CI must be able to
+#     verify the BLE conformance vectors on every commit.
+#   * `build_runner` is therefore intentionally ABSENT from dev_dependencies. If a
+#     future feature genuinely needs codegen, add it back in one place.
+#
+# Everything else in this file is a runtime dependency, each with the reason it is
+# needed. `lib/core/logger.dart` explains the no-`print` rule.
+name: smart_accident_alert
+description: >-
+  IoT accident-alert system: pairs with an ESP32 + MPU6050 + SW-420 node over a
+  frozen BLE protocol, resolves nearby hospitals, and dispatches emergency alerts
+  to contacts and the cloud. Works fully offline (PROJECT_PLAN §25).
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  # Dart 3.3 floor gives us sealed classes, patterns, records and class modifiers.
+  # The <4.0.0 ceiling is the Dart team's forward-compatibility guarantee; the
+  # resolved SDK will actually be >= 3.13 because go_router / google_maps_flutter /
+  # sqflite require it.
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  # The SDK package itself. `flutter pub get` needs this declared to resolve
+  # `package:flutter/...` imports; the analyzer flags every such import with
+  # `depend_on_referenced_packages` when it is missing.
+  flutter:
+    sdk: flutter
+
+  # `@immutable` for the domain and protocol value types. Imported directly
+  # (rather than via `package:flutter/foundation.dart`) because
+  # lib/domain/entities must not depend on Flutter.
+  meta: ^1.16.0
+
+  # ---------------------------------------------------------------- state + routing
+  # State management. Chosen over Bloc/Provider because: (a) the app is a graph of
+  # long-lived, independently-disposed streams (BLE link, GPS, outbox, telemetry) and
+  # Riverpod models that with providers + ref.onDispose; (b) providers are trivially
+  # overridable, which is what lets the whole app run against FakeBleTransport in
+  # tests and in hardware-free demos.
+  flutter_riverpod: ^3.3.2
+
+  # Declarative routing with typed paths + redirect guards. The emergency alert needs
+  # a fullscreenDialog route that can present over every other route; go_router gives
+  # that plus redirect() for the auth/onboarding gate.
+  go_router: ^17.2.3
+
+  # ---------------------------------------------------------------- BLE (the hot path)
+  # BLE transport. We only ever talk to our own GATT service UUID, subscribe to the
+  # TX (50 Hz telemetry) and CTRL (events) notify characteristics, and write to RX.
+  # v2.x requires an explicit `License` on connect() — see lib/core/constants.dart
+  # (bleLicense) for the nonprofit/commercial note.
+  flutter_blue_plus: ^2.3.13
+
+  # ---------------------------------------------------------------- location
+  # GPS fix for the accident position (PROJECT_PLAN §14). Used together with
+  # permission_handler: geolocator does the fix, permission_handler owns the
+  # rationale / "open app settings" UX that geolocator's API does not model.
+  geolocator: ^14.0.2
+
+  # Runtime permission flow for location (fine + background), Bluetooth scan/connect
+  # (Android 12+ BLUETOOTH_SCAN/CONNECT are runtime permissions) and notifications
+  # (Android 13+ POST_NOTIFICATIONS). Also provides openAppSettings() for the
+  # permanently-denied path.
+  permission_handler: ^13.0.2
+
+  # ---------------------------------------------------------------- cloud
+  # Firebase bootstrap. Keeping this explicit (rather than a transitive dep) makes
+  # the required google-services.json / GoogleService-Info.plist wiring explicit.
+  firebase_core: ^4.15.0
+
+  # Accident + hospital + profile storage (PROJECT_PLAN §17). Used with
+  # `settings = Settings(persistenceEnabled: true)` so an accident recorded in a
+  # tunnel with no signal is still written locally and reconciled later.
+  cloud_firestore: ^6.10.0
+
+  # Authentication. §26 requires authenticated access to personal location data.
+  # The app signs in anonymously by default (a real, rules-enforceable credential
+  # that needs no PII) and can be upgraded to an email link later.
+  firebase_auth: ^6.7.0
+
+  # Push to emergency contacts' phones / the user's own phone when dispatch happens
+  # outside the foreground, and background-message handling for data messages.
+  firebase_messaging: ^16.7.0
+
+  # ---------------------------------------------------------------- offline storage
+  # The offline outbox (PROJECT_PLAN §25 "Internet unavailable": store locally,
+  # sync when connectivity returns) plus cached accident history and the hospital
+  # cache. SQLite, not SharedPreferences, because the outbox needs indexed queries
+  # ("give me the 20 oldest unsynced rows") and crash-safe writes.
+  sqflite: ^2.4.2
+
+  # `join()` for the sqflite database path, and asset paths.
+  path: ^1.9.1
+
+  # Small scalar settings (theme mode, last device id, onboarding flag, countdown
+  # preference). Anything relational or queued lives in sqflite.
+  shared_preferences: ^2.5.5
+
+  # ---------------------------------------------------------------- notifications
+  # Two jobs: (a) the always-on "monitoring" foreground notification so Android does
+  # not kill the BLE scan; (b) the CRITICAL emergency channel with
+  # fullScreenIntent + sound + vibration, which is the only thing that wakes the
+  # screen when the app is backgrounded during an accident.
+  # NOTE: we deliberately do NOT use zonedSchedule() — it drags in the `timezone`
+  # package for no benefit, because the cancel-countdown runs inside the app.
+  flutter_local_notifications: ^20.1.0
+
+  # ---------------------------------------------------------------- platform intents
+  # `tel:` to call a hospital, `sms:` to send the §20 emergency message, and
+  # `https://www.google.com/maps/search/?api=1&query=LAT,LON` (§15) to open maps.
+  # We build the URIs ourselves so they are testable without a platform channel.
+  url_launcher: ^6.3.2
+
+  # Rich in-app map for the accident location + hospital markers. Deliberately NOT
+  # the only way to see a location: §15's external maps URL is always available as
+  # a fallback, because in-app maps needs an API key and network we may not have.
+  google_maps_flutter: ^2.14.2
+
+  # ---------------------------------------------------------------- formatting
+  # Date/number formatting. The app is en-IN first (§6.1 locale) but the UI must
+  # localise cleanly; `intl` is the only correct way to do that.
+  intl: ^0.20.3
+
+  # Self-hosted Material/Inter typefaces at runtime so the "premium" look does not
+  # depend on the platform having a nice default font, and so we can ship one
+  # tabular-figure cut (see core/theme/typography.dart).
+  google_fonts: ^8.1.0
+
+  # Icons that are not in the Material icon font (vehicle/sensor/alert glyphs).
+  flutter_svg: ^2.3.0
+
+  # ---------------------------------------------------------------- connectivity
+  # Drives the outbox retry scheduler and the "Offline — N events queued" banner.
+  # Deliberately treated as a *hint*: the real source of truth for "can I reach
+  # Firestore" is the result of the write attempt, not the radio state.
+  connectivity_plus: ^7.3.1
+
+  # ---------------------------------------------------------------- motion
+  # Polished transitions (countdown pulse, status pill crossfade, sheet reveal) with
+  # a single reduced-motion escape hatch (core/theme/motion.dart). Chosen over
+  # `animations` because it degrades gracefully when a widget is rebuilt with a new
+  # value and needs no per-transition AnimationController bookkeeping.
+  flutter_animate: ^4.5.2
+
+dev_dependencies:
+  # Unit + golden-conformance tests. The protocol tests read
+  # ../../tools/protocol/golden.json and assert byte-for-byte parity with the
+  # JS reference codec.
+  # NOTE: the `sdk:` form must be a nested block. pub's YAML parser (unlike a
+  # general-purpose one) does not accept the inline `flutter_test: sdk:flutter`
+  # shorthand and fails with "Could not parse version \"sdk:flutter\"".
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+  # Mock/fake doubles for transports (BLE, location, clock) in tests.
+  mocktail: ^1.0.5
+
+# NOTE: no `build_runner` — see the architectural note at the top of this file.
+
+flutter:
+  # The bundled hospital dataset, so nearby-hospital search works on first
+  # launch with no network — the case §25 requires the app to survive. This is
+  # a generated copy of backend/seed/hospitals.json; after `make seed`, re-copy
+  # it or the app will silently fall back to the cloud.
+  uses-material-design: true
+  assets:
+    - assets/data/hospitals.json
