@@ -1,0 +1,135 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Permissions are declared here with the reason next to each one, because
+      "why does an accident app want my location" is a fair question and an
+      unexplained prompt earns a refusal. The same explanations are in
+      docs/09-security-and-privacy.md and are shown in the app when a permission
+      is requested.
+    -->
+
+    <!-- Cloud: Firestore and Firebase Auth. The app is fully functional without
+         it — accidents are written to SQLite first and uploaded later. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+    <!-- BLE, to find and connect to the accident-detection node.
+         Android 12 (API 31) split BLUETOOTH into SCAN and CONNECT. Both
+         WITHOUT the NEVER_FOR_LOCATION flag are required: the firmware
+         advertises a service UUID rather than a location beacon, so omitting the
+         flag does not restrict the scan. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+
+    <!-- Legacy BLE permissions, for API 30 and below. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30"/>
+
+    <!--
+      Location, for the accident position.
+
+      FINE is also required for BLE *scanning* on Android 10+ regardless of
+      whether the app ever stores a location, which surprises people; the app
+      says so rather than showing an unexplained prompt.
+
+      BACKGROUND is declared separately from FINE because Android requires it to
+      be requested in a second, distinct dialog. Without it, Android kills the
+      BLE connection within a few minutes of the app being backgrounded, and
+      detection stops while the vehicle is moving — the one situation the system
+      exists for. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+
+    <!-- The emergency alert (Android 13+). If refused, an alert may not reach
+         the user when the app is closed; the app states this explicitly rather
+         than pretending to be fully functional. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Keeps the BLE link alive while the app is backgrounded. This is what
+         the persistent "Monitoring active" notification is anchored to. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+
+    <!-- Dialling and messaging an emergency contact, and opening a map. Each is
+         resolved through an intent, so none of these require a runtime grant;
+         they are declared so the intent resolver can see this app as a
+         candidate. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.DIAL"/>
+            <data android:scheme="tel"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO"/>
+            <data android:scheme="smsto"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+    </queries>
+
+    <!-- BLE is required, so the app should not be installable on a device
+         without it. -->
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true"/>
+    <!-- Location can be declined, so GPS is not required to install. -->
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false"/>
+
+    <application
+        android:label="Smart Accident Alert"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!--
+          No <service> is declared here.
+
+          The "Monitoring active" notification is posted by
+          flutter_local_notifications rather than anchored to a foreground
+          service, because this app does not ship a background service class.
+          Declaring a <service> for a class that does not exist in the dependency
+          tree makes the package fail at launch, so it is deliberately absent.
+
+          The practical consequence is documented rather than hidden: Android may
+          still kill a long-backgrounded BLE connection, and the app reconnects
+          with backoff. See docs/09-security-and-privacy.md.
+        -->
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+</manifest>
