@@ -1,0 +1,11 @@
+{
+  "name": "smart-accident-alert-tools",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "golden": "node generate-golden.mjs",
+    "test": "node --test 'test/*.mjs'"
+  }
+}
