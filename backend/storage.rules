@@ -1,0 +1,62 @@
+rules_version = '2';
+
+/**
+ * Cloud Storage security rules — Smart Accident Alert System.
+ *
+ * Storage holds crash photos and nothing else. The threat model is the same as
+ * the Firestore rules (see backend/firestore.rules for the full list) with one
+ * storage-specific addition:
+ *
+ * T9  Direct object access. Anyone holding the download URL can fetch a crash
+ *     photo, and a crash photo is the most identifying artefact this system
+ *     holds — number plates, faces, dashboards. Reads are therefore never
+ *     public, the objects live under the accident path so the Firestore owner
+ *     check applies, and there is no public bucket.
+ *
+ * T10 Type and size laundering. A 5 MB cap plus an image content-type check
+ *     stops the bucket being used as free hosting, and stops a client
+ *     smuggling an HTML or SVG payload under a photo MIME type.
+ *
+ * A note on download tokens: Firebase's own SDKs attach a long-lived download
+ * token to object URLs, so revoking a Firestore document does not invalidate a
+ * URL that was already handed out. That is a property of the SDK, not of these
+ * rules. Keep the token TTL short (see backend/README.md) and do not treat a
+ * generated URL as a capability you can withdraw later.
+ */
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /**
+     * The owner check reads the accident document, so a storage path can only
+     * ever be reached by someone who already owns the accident. There is no
+     * per-object ACL to drift out of sync with Firestore, because there is no
+     * per-object ACL at all.
+     */
+    function isAccidentOwner(accidentId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/accidents/$(accidentId))
+        && firestore.get(/databases/(default)/documents/accidents/$(accidentId)).data.userId == request.auth.uid;
+    }
+
+    match /accidents/{accidentId}/attachments/{fileName} {
+      // T9. Owner only, read and write.
+      allow read: if isAccidentOwner(accidentId);
+      allow write: if isAccidentOwner(accidentId)
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+
+      // Deleting is a write with no resource; keep the same owner check but
+      // do not evaluate request.resource, which is absent on delete.
+      allow delete: if isAccidentOwner(accidentId);
+    }
+
+    /**
+     * T7/T10. Anything outside the accident attachment path is denied. There is
+     * deliberately no bucket-level default allow.
+     */
+  }
+}

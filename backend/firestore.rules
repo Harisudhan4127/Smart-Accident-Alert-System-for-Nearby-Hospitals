@@ -1,0 +1,360 @@
+rules_version = '2';
+
+/**
+ * Firestore security rules — Smart Accident Alert System.
+ *
+ * Read this threat model before changing a single `allow`.
+ *
+ * The data here is emergency PII: a user's home address is embedded in every
+ * accident fix, and `users/{uid}` holds phone numbers for the user *and* their
+ * family. A rule that leaks either one is a real-world harm, not a lint.
+ *
+ * Threats this file is written against
+ * ------------------------------------
+ * T1  Read access to another user's accident. The accident record carries a
+ *     home or crash-site location and the impact reading; §26 requires that
+ *     accident records are never public.
+ * T2  Read access to another user's profile, i.e. harvesting phone numbers for
+ *     the user and their emergency contacts.
+ * T3  Collection enumeration. `list` on `users` or `accidents` without a
+ *     constraint would hand an attacker every document in the collection.
+ * T4  Forging ownership — writing an `accidents` document whose `userId` is
+ *     somebody else, or mutating `userId` after creation to escape ownership.
+ * T5  Forged evidence — a client asserting a status, an impact magnitude or a
+ *     device id that the node never reported, so a later audit cannot tell
+ *     client claims from measurements.
+ * T6  Poisoning the hospital dataset. A hospital record steers a frightened
+ *     person to a physical building; if any signed-in user can edit one, the
+ *     dataset becomes an attack surface against a 3 a.m. search.
+ * T7  Accidentally public by default. An unmatched path denies, and there is no
+ *     `allow public, if: false` style escape hatch below.
+ * T8  A hospital "grant" being mistaken for a notification. Reading a grant
+ *     means a record was shared, never that anyone was told. See GRANTS.
+ *
+ * Deliberate non-goals
+ * --------------------
+ * These rules cannot make a client honest. A user can always lie about what
+ * happened, and the app running on their own phone is inside their trust
+ * boundary. What the rules *do* guarantee is containment: one account cannot
+ * read, alter or enumerate another account's data, and the fields a dispatch
+ * depends on are range- and type-checked before anything downstream trusts them.
+ */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ------------------------------------------------------------------ *
+     * helpers
+     * ------------------------------------------------------------------ */
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    /**
+     * Hospital data administration.
+     *
+     * T6. Deliberately a *custom claim*, not a hard-coded email: claims are
+     * set server-side and survive revocation, and an email check would either
+     * leak the maintainer's address in every rule file or be trivially
+     * satisfied by anyone who learns it. See backend/README.md for how to
+     * grant it. There is no other write path into `hospitals`.
+     */
+    function isHospitalAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    function isAccidentOwner(accidentId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/accidents/$(accidentId))
+        && get(/databases/$(database)/documents/accidents/$(accidentId)).data.userId == request.auth.uid;
+    }
+
+    function isValidString(value, maxLength) {
+      return value is string && value.size() > 0 && value.size() <= maxLength;
+    }
+
+    /** A dialable number. Loose on purpose: formats vary, length is the risk. */
+    function isValidPhone(value) {
+      return value is string && value.size() >= 6 && value.size() <= 24;
+    }
+
+    /**
+     * §18 status set. `UNKNOWN` is deliberately absent: the app maps an
+     * unrecognised status to an inert terminal value, but no client may *write*
+     * it, because writing it is indistinguishable from corrupting a record.
+     */
+    function isValidStatus(value) {
+      return value is string
+        && value in ['DETECTED', 'CANCELLED', 'CONFIRMED', 'ALERT_SENT', 'RESOLVED'];
+    }
+
+    function isValidGeoData(data) {
+      return data.keys().hasAll(['latitude', 'longitude', 'accuracyM'])
+        && data.latitude is number
+        && data.latitude >= -90 && data.latitude <= 90
+        && data.longitude is number
+        && data.longitude >= -180 && data.longitude <= 180
+        // Anything above ~100 km is not a fix, it is a cell tower guess. The
+        // app still shows it, labelled; it just is not allowed to claim
+        // metre-level accuracy.
+        && data.accuracyM is number
+        && data.accuracyM >= 0 && data.accuracyM <= 100000;
+    }
+
+    /* ------------------------------------------------------------------ *
+     * users/{userId}
+     *
+     * §17: name, phone, vehicleNumber, emergencyContacts.
+     *
+     * T1/T2/T3. Owner-only, including reads. §26 asks for protection of
+     * emergency-contact information, and the only party that needs a user's
+     * contact list is a dispatch function running as the Admin SDK, which
+     * bypasses these rules by design.
+     * ------------------------------------------------------------------ */
+    match /users/{userId} {
+      allow get, list: if isOwner(userId);
+
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasOnly([
+             'name', 'phone', 'vehicleNumber', 'emergencyContacts',
+             'notificationPermissionGranted', 'createdAt', 'updatedAt'
+           ])
+        && isValidString(request.resource.data.name, 120)
+        && isValidPhone(request.resource.data.phone)
+        && isValidString(request.resource.data.vehicleNumber, 24)
+        && validContacts(request.resource.data.emergencyContacts)
+        && request.resource.data.notificationPermissionGranted is bool
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && request.resource.data.userId == userId
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly([
+               'name', 'phone', 'vehicleNumber', 'emergencyContacts',
+               'notificationPermissionGranted', 'updatedAt'
+             ])
+        && isValidString(request.resource.data.name, 120)
+        && isValidPhone(request.resource.data.phone)
+        && isValidString(request.resource.data.vehicleNumber, 24)
+        && validContacts(request.resource.data.emergencyContacts)
+        && request.resource.data.notificationPermissionGranted is bool
+        && request.resource.data.updatedAt == request.time;
+
+      // §26 does not require erasure, and a driver who deletes their own
+      // history loses the evidence that a crash happened. Owner-initiated
+      // delete is allowed anyway: a person who wants their location data gone
+      // has an absolute claim to that, and "we kept it because we might need
+      // it" is not an answer to them.
+      allow delete: if isOwner(userId);
+
+      /**
+       * T2. At most ten contacts, each a small typed object. The cap matters
+       * more than the shape: an unbounded array is a free write amplification
+       * primitive and a spam list for whoever the user points it at.
+       */
+      function validContacts(value) {
+        return value is list
+          && value.size() <= 10
+          && value.all(c, c is map
+            && c.keys().hasOnly(['id', 'name', 'phone', 'relationship'])
+            && isValidString(c.id, 64)
+            && isValidString(c.name, 120)
+            && isValidPhone(c.phone)
+            && (!c.keys().hasAny(['relationship']) || (c.relationship is string && c.relationship.size() <= 60)));
+      }
+    }
+
+    /* ------------------------------------------------------------------ *
+     * accidents/{accidentId}
+     *
+     * §17: userId, latitude, longitude, accuracy, timestamp, impactValue,
+     * status, deviceId.
+     *
+     * T1/T3/T4. Owner-only, and `userId` is immutable once written — otherwise
+     * ownership is a mutable field and every other check here is decorative.
+     * ------------------------------------------------------------------ */
+    match /accidents/{accidentId} {
+      allow get, list: if isOwner(resource.data.userId);
+
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && validCreate(request.resource.data);
+
+      allow update: if isOwner(resource.data.userId)
+        && request.resource.data.userId == resource.data.userId
+        && validTransition(resource.data, request.resource.data)
+        && validUpdate(request.resource.data);
+
+      // Own data, own deletion. See the note on users/{uid} delete.
+      allow delete: if isOwner(resource.data.userId);
+
+      /**
+       * T5. Required on create, and deliberately narrow: the plan calls the
+       * phone the source of `location` and the node the source of the impact
+       * reading, so a record that has neither is not dispatchable and should
+       * not exist.
+       */
+      function validCreate(data) {
+        return data.keys().hasAll([
+                 'userId', 'status', 'impactValue', 'latitude', 'longitude',
+                 'accuracyM', 'occurredAt', 'createdAt', 'updatedAt'
+               ])
+          && isValidStatus(data.status)
+          && data.impactValue is number
+          && data.impactValue >= 0 && data.impactValue <= 1000
+          && isValidGeoData(data)
+          && data.occurredAt is timestamp
+          && data.createdAt == request.time
+          && data.updatedAt == request.time
+          && (!data.keys().hasAny(['deviceId']) || isValidString(data.deviceId, 64))
+          && (!data.keys().hasAny(['impactG']) || (data.impactG is number && data.impactG >= 0 && data.impactG <= 1000))
+          && (!data.keys().hasAny(['impactScore']) || (data.impactScore is int && data.impactScore >= 0 && data.impactScore <= 100))
+          && (!data.keys().hasAny(['detectedDeviceState']) || isValidString(data.detectedDeviceState, 16))
+          && optionalHospitalFieldsValid(data);
+      }
+
+      /**
+       * T5. Updates are constrained to the §18 transition graph. Without this,
+       * a client can move a record straight from DETECTED to ALERT_SENT and
+       * the history list becomes a log of whatever the client claimed.
+       *
+       * The graph mirrors `AccidentStatus.canTransitionTo` in
+       * app/lib/domain/entities/accident.dart. If you change one, change both.
+       */
+      function validTransition(before, after) {
+        return after.status == before.status || (
+          (before.status == 'DETECTED' && after.status in ['CANCELLED', 'CONFIRMED'])
+          || (before.status == 'CONFIRMED' && after.status == 'ALERT_SENT')
+          || (before.status == 'ALERT_SENT' && after.status == 'RESOLVED')
+        );
+      }
+
+      function validUpdate(data) {
+        return data.occurredAt == resource.data.occurredAt
+          && data.latitude == resource.data.latitude
+          && data.longitude == resource.data.longitude
+          && data.impactValue == resource.data.impactValue
+          && data.updatedAt == request.time
+          && isValidStatus(data.status)
+          && isValidGeoData(data)
+          && (!data.keys().hasAny(['hospitalId']) || isValidString(data.hospitalId, 64))
+          && (!data.keys().hasAny(['hospitalName']) || isValidString(data.hospitalName, 160))
+          && (!data.keys().hasAny(['notifiedContactIds'])
+              || (data.notifiedContactIds is list
+                  && data.notifiedContactIds.size() <= 10
+                  && data.notifiedContactIds.all(c, c is string && c.size() > 0 && c.size() <= 64)))
+          && optionalHospitalFieldsValid(data);
+      }
+
+      function optionalHospitalFieldsValid(data) {
+        return (!data.keys().hasAny(['hospitalRating']) || (data.hospitalRating is number
+                && data.hospitalRating >= 0 && data.hospitalRating <= 5))
+          && (!data.keys().hasAny(['hospitalDistanceM']) || (data.hospitalDistanceM is number
+                && data.hospitalDistanceM >= 0 && data.hospitalDistanceM <= 200000));
+      }
+
+      /* -------------------------------------------------------------- *
+       * accidents/{accidentId}/grants/{grantId}
+       *
+       * T8. A grant is the *only* way one account reads another account's
+       * accident, it is created by the owner, and it carries the minimum: who
+       * was let in, when, and why. It is deliberately NOT a notification
+       * channel — nothing here sends, queues or delivers anything. A hospital
+       * appearing in a grant list means a record was made visible to it. It
+       * does not mean a clinician has seen it, been paged, or accepted the
+       * patient. Do not build a UI that implies otherwise (§20, §27).
+       * -------------------------------------------------------------- */
+      match /grants/{grantId} {
+        allow get, list: if isAccidentOwner(accidentId) || request.auth.uid == grantId;
+        allow create, delete: if isAccidentOwner(accidentId)
+          && request.resource.data.keys().hasOnly(['grantedAt', 'reason', 'expiresAt'])
+          && request.resource.data.grantedAt == request.time
+          && isValidString(request.resource.data.reason, 200)
+          && (!request.resource.data.keys().hasAny(['expiresAt'])
+              || request.resource.data.expiresAt is timestamp);
+        // A grant is revoked by deleting it, never by editing it: an edit
+        // would leave the audit trail showing the grant that was consented to
+        // rather than the one that was withdrawn.
+        allow update: if false;
+      }
+
+      /* -------------------------------------------------------------- *
+       * accidents/{accidentId}/attachments/{fileName}
+       *
+       * Owner-only crash photos. Small, image-typed, and capped: this is a
+       * convenience for the user, not a media library.
+       * -------------------------------------------------------------- */
+      match /attachments/{fileName} {
+        allow read: if isAccidentOwner(accidentId);
+        allow write: if isAccidentOwner(accidentId)
+          && request.resource.size < 5 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      }
+    }
+
+    /* ------------------------------------------------------------------ *
+     * hospitals/{hospitalId}
+     *
+     * §16 allows a predefined list for the prototype. A hospital record holds
+     * no personal data, and §16's flow needs an unauthenticated read so the
+     * search can run before sign-in and from a read-only kiosk.
+     *
+     * T6 is the reason reads are public and writes are not. Public read,
+     * admin-only write, no exceptions for the owner of an accident.
+     * ------------------------------------------------------------------ */
+    match /hospitals/{hospitalId} {
+      allow get, list: if true;
+      allow create, update, delete: if isHospitalAdmin() && validHospital(request.resource.data);
+    }
+
+    /**
+     * T6. A poisoned record has to be *representable* to be worth validating:
+     * a latitude of 999 sends someone to the middle of an ocean, and a
+     * `type` of `EMERGENCY` on a clinic is a lie the app will act on.
+     *
+     * The `hasOnly` list is exactly the key set that
+     * `backend/seed/generate.mjs` writes — not one field more, not one less.
+     * `isAnchor` is in it because the seed uses it to mark the 14 real anchor
+     * rows apart from the fictional ones, and a rule that rejected the seed's
+     * own documents would be a rule nobody could test. An earlier revision of
+     * this file listed `searchScoreHint` here instead: no code has ever read
+     * or written that field, so allowing it was a hole with no door.
+     */
+    function validHospital(data) {
+      return data.keys().hasOnly([
+             'name', 'address', 'latitude', 'longitude', 'phone',
+             'type', 'beds', 'hasEmergency', 'rating',
+             'geohashPrefixes', 'isAnchor'
+           ])
+        && isValidString(data.name, 160)
+        && isValidString(data.address, 300)
+        && isValidPhone(data.phone)
+        && data.latitude is number && data.latitude >= -90 && data.latitude <= 90
+        && data.longitude is number && data.longitude >= -180 && data.longitude <= 180
+        && (!data.keys().hasAny(['type'])
+            || data.type in ['EMERGENCY', 'MULTI_SPECIALTY', 'CLINIC', 'OTHER'])
+        && (!data.keys().hasAny(['beds']) || (data.beds is int && data.beds >= 0 && data.beds <= 100000))
+        && (!data.keys().hasAny(['hasEmergency']) || data.hasEmergency is bool)
+        && (!data.keys().hasAny(['rating']) || (data.rating is number && data.rating >= 0 && data.rating <= 5))
+        && (!data.keys().hasAny(['isAnchor']) || data.isAnchor is bool)
+        && data.geohashPrefixes is list
+        && data.geohashPrefixes.size() > 0
+        && data.geohashPrefixes.size() <= 4
+        && data.geohashPrefixes.all(p, p is string && p.size() >= 4 && p.size() <= 8);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Everything not named above.
+     *
+     * T7. No catch-all `match /{document=**}` with a permissive rule. Any
+     * collection added later is denied until someone writes its rule on
+     * purpose, which is the correct default for emergency PII.
+     * ------------------------------------------------------------------ */
+  }
+}

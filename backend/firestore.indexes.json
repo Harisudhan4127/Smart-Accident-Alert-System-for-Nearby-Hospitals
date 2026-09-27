@@ -1,0 +1,21 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "hospitals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "geohashPrefixes", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "hasEmergency", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "hospitals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "geohashPrefixes", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "type", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
