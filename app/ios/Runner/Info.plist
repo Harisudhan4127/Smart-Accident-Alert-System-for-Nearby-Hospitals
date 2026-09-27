@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  iOS usage strings. These are required-attestation strings: App Review
+	  rejects a vague one, so each names the specific use and says where the data
+	  goes. The wording is mirrored in docs/09-security-and-privacy.md.
+	-->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Smart Accident Alert uses your location while it is open to mark where an accident happened, so nearby hospitals and your emergency contacts can be given the position.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Smart Accident Alert uses your location in the background to keep watching for a collision while you drive. Without this, iOS suspends the app and it cannot detect a crash until you reopen it.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Smart Accident Alert uses Bluetooth to connect to the accident-detection node in your vehicle and to receive crash alerts from it.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Smart Accident Alert uses Bluetooth to connect to the accident-detection node in your vehicle.</string>
+
+	<!--
+	  The app displays and sends nothing on its own: the emergency SMS opens the
+	  user's own composer, pre-filled, so they see and send it. No outbound data
+	  is sent to a third-party server other than the Firebase project the user
+	  configures.
+	-->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>tel</string>
+		<string>sms</string>
+		<string>https</string>
+		<string>comgooglemaps</string>
+	</array>
+
+	<!-- Keeps the BLE connection alive while the app is backgrounded. Without
+	     it, iOS suspends the app during a drive, which is the only situation
+	     the system exists for. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>location</string>
+	</array>
+
+	<key>CFBundleDisplayName</key>
+	<string>Smart Accident Alert</string>
+	<key>CFBundleName</key>
+	<string>saas</string>
+
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Smart Accident Alert</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>smart_accident_alert</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+</dict>
+</plist>
