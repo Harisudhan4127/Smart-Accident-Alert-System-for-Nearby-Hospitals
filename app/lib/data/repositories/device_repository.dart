@@ -366,7 +366,7 @@ class DeviceRepository {
         isCalibrated: ack.calibrated ?? false,
         hasVibrationSensor: ack.sw420 ?? false,
         hasOled: ack.oled?.present ?? false,
-        whoAmIName: ack.mpu?.whoAmIName,
+        sensorName: ack.sensor?.part,
         linkState: compatible ? DeviceLinkState.connected : DeviceLinkState.incompatible,
       ),
     );

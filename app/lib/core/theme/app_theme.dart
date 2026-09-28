@@ -94,9 +94,14 @@ abstract final class AppColors {
   /// Accelerometer series. Cyan reads as "the primary signal".
   static const Color accel = Color(0xFF2DD4FF);
 
-  /// Gyroscope series. Violet separates it from cyan for colour-blind readers
-  /// (cyan/violet remain distinguishable in all three common CVD types).
-  static const Color gyro = Color(0xFFA78BFA);
+  /// SW-420 vibration channel. Violet separates it from cyan for colour-blind
+  /// readers (cyan/violet remain distinguishable in all three common CVD types).
+  ///
+  /// This slot used to be the gyroscope series, and the ADXL345 has no
+  /// gyroscope. Violet was kept rather than freed: the SW-420 is the node's one
+  /// other independent evidence channel, and it is what a second trace on this
+  /// chart should show.
+  static const Color vibration = Color(0xFFA78BFA);
 
   /// Magnitude envelope.
   static const Color magnitude = Color(0xFF38BDF8);
@@ -125,8 +130,8 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
   const TelemetryPalette({
     required this.accel,
     required this.accelFill,
-    required this.gyro,
-    required this.gyroFill,
+    required this.vibration,
+    required this.vibrationFill,
     required this.magnitude,
     required this.peak,
     required this.threshold,
@@ -142,8 +147,8 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
   factory TelemetryPalette.dark() => const TelemetryPalette(
         accel: AppColors.accel,
         accelFill: Color(0x332DD4FF),
-        gyro: AppColors.gyro,
-        gyroFill: Color(0x33A78BFA),
+        vibration: AppColors.vibration,
+        vibrationFill: Color(0x33A78BFA),
         magnitude: AppColors.magnitude,
         peak: AppColors.peak,
         threshold: AppColors.threshold,
@@ -161,8 +166,8 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
   factory TelemetryPalette.light() => const TelemetryPalette(
         accel: Color(0xFF0077B6),
         accelFill: Color(0x1F0077B6),
-        gyro: Color(0xFF6D3BE0),
-        gyroFill: Color(0x1F6D3BE0),
+        vibration: Color(0xFF6D3BE0),
+        vibrationFill: Color(0x1F6D3BE0),
         magnitude: Color(0xFF0369A1),
         peak: Color(0xFF8A5A00),
         threshold: Color(0xFFC1121F),
@@ -180,11 +185,11 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
   /// Gradient fill under the accelerometer trace.
   final Color accelFill;
 
-  /// Gyroscope trace.
-  final Color gyro;
+  /// SW-420 vibration trace.
+  final Color vibration;
 
-  /// Gradient fill under the gyroscope trace.
-  final Color gyroFill;
+  /// Gradient fill under the vibration trace.
+  final Color vibrationFill;
 
   /// Magnitude envelope (the signal the detector actually fuses on).
   final Color magnitude;
@@ -217,8 +222,8 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
   TelemetryPalette copyWith({
     Color? accel,
     Color? accelFill,
-    Color? gyro,
-    Color? gyroFill,
+    Color? vibration,
+    Color? vibrationFill,
     Color? magnitude,
     Color? peak,
     Color? threshold,
@@ -232,8 +237,8 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
       TelemetryPalette(
         accel: accel ?? this.accel,
         accelFill: accelFill ?? this.accelFill,
-        gyro: gyro ?? this.gyro,
-        gyroFill: gyroFill ?? this.gyroFill,
+        vibration: vibration ?? this.vibration,
+        vibrationFill: vibrationFill ?? this.vibrationFill,
         magnitude: magnitude ?? this.magnitude,
         peak: peak ?? this.peak,
         threshold: threshold ?? this.threshold,
@@ -253,8 +258,8 @@ class TelemetryPalette extends ThemeExtension<TelemetryPalette> {
     return TelemetryPalette(
       accel: Color.lerp(accel, other.accel, t)!,
       accelFill: Color.lerp(accelFill, other.accelFill, t)!,
-      gyro: Color.lerp(gyro, other.gyro, t)!,
-      gyroFill: Color.lerp(gyroFill, other.gyroFill, t)!,
+      vibration: Color.lerp(vibration, other.vibration, t)!,
+      vibrationFill: Color.lerp(vibrationFill, other.vibrationFill, t)!,
       magnitude: Color.lerp(magnitude, other.magnitude, t)!,
       peak: Color.lerp(peak, other.peak, t)!,
       threshold: Color.lerp(threshold, other.threshold, t)!,

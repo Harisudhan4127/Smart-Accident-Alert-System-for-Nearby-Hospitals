@@ -50,7 +50,7 @@ enum SimScenario {
   /// Telemetry flows normally; the caller can drop the link to test reconnect.
   normalDriveThenDrop,
 
-  /// The node reports a sensor fault (MPU6050 not answering).
+  /// The node reports a sensor fault (the ADXL345 is not answering).
   sensorFault,
 }
 
@@ -374,9 +374,6 @@ class FakeBleTransport implements BleTransport {
       accX: sample.ax.round(),
       accY: sample.ay.round(),
       accZ: sample.az.round(),
-      gyrX: (sample.gx * 10).round(),
-      gyrY: (sample.gy * 10).round(),
-      gyrZ: (sample.gz * 10).round(),
       magMg: sample.magMg.round(),
       peakMg: sample.magMg.round(),
       flags: TelemetryFlags(
@@ -417,8 +414,6 @@ class FakeBleTransport implements BleTransport {
             impact: const ImpactSummary(
               magG: 4.82,
               peakAccMg: 4820,
-              peakGyrDps: 391,
-              gyrMagDps: 402.1,
               sw420: true,
               orientationChangeDeg: 63.4,
               preImpactSpeedKmh: 48.3,
@@ -451,10 +446,11 @@ class FakeBleTransport implements BleTransport {
             state: _scenario == SimScenario.sensorFault
                 ? DeviceState.fault
                 : DeviceState.idle,
-            mpu: MpuInfo(
+            sensor: SensorInfo(
               present: _scenario != SimScenario.sensorFault,
-              addr: '0x68',
-              whoAmI: 0x71,
+              part: 'ADXL345',
+              addr: '0x53',
+              deviceId: SensorInfo.expectedDeviceId,
             ),
             oled: OledInfo(present: _options.oledPresent, addr: '0x3C'),
             sw420: _options.sw420Present,
@@ -600,7 +596,6 @@ class FakeBleTransport implements BleTransport {
             uptimeMs: _uptimeMs,
             effectiveConfig: _effectiveConfig,
             peakMagMg: 4820,
-            peakGyrDps: 391,
             sw420: _options.sw420Present,
             sw420Hits: 3,
             score: _pendingEventSeq == 0 ? 0 : 87,
@@ -630,7 +625,7 @@ class FakeBleTransport implements BleTransport {
             droppedFrames: 0,
             crcErrors: _txScanner.stats.crcErrors + _ctrlScanner.stats.crcErrors,
             bleClients: 1,
-            mpuI2cErrors: 0,
+            sensorI2cErrors: 0,
             oledOk: _options.oledPresent,
             brownoutCount: 0,
             watchdogResets: 0,
@@ -656,9 +651,6 @@ class FakeBleTransport implements BleTransport {
                 accX: ((_rng.nextDouble() - 0.5) * 40).round(),
                 accY: ((_rng.nextDouble() - 0.5) * 40).round(),
                 accZ: (1000 + (_rng.nextDouble() - 0.5) * 40).round(),
-                gyrX: ((_rng.nextDouble() - 0.5) * 4).round(),
-                gyrY: ((_rng.nextDouble() - 0.5) * 4).round(),
-                gyrZ: ((_rng.nextDouble() - 0.5) * 4).round(),
                 sw420: false,
               );
             }),
