@@ -72,7 +72,7 @@ offline outbox are all genuinely exercised.
    | Library | Needed for |
    | --- | --- |
    | **NimBLE-Arduino** 1.4.x | The BLE stack |
-   | **Adafruit MPU6050** | The accelerometer |
+   | **Adafruit ADXL345** | The accelerometer |
    | **Adafruit SSD1306** + **Adafruit GFX Library** + **Adafruit BusIO** | The OLED |
    | **Adafruit Unified Sensor** | A dependency of the above |
 
@@ -118,7 +118,7 @@ verified path** — the PlatformIO build has not been executed in CI.
 ### Toggling the self-test
 
 Hold **BOOT** while powering on. The firmware runs a full hardware self-test
-(MPU6050 identity, OLED presence, SW-420 state) and prints the result to the
+(ADXL345 identity, OLED presence, SW-420 state) and prints the result to the
 serial monitor before starting normal operation.
 
 ### Tuning
@@ -129,7 +129,6 @@ Everything adjustable is in `firmware/SmartAccidentAlert/config.h`:
 | --- | --- |
 | Pin map | `PIN_SDA`, `PIN_SCL`, `PIN_SW420`, `PIN_BUZZER`, `PIN_SOS`, … |
 | `kAccelThresholdMg` | Impact threshold (default 3000) |
-| `kGyroThresholdDps` | Rollover threshold (default 220) |
 | `kConfirmWindowSec` | Cancel window (default 10) |
 | `kSensorRateHz` | Sample rate (default 50) |
 | `kRefractoryMs` | Lockout after a trigger |
@@ -208,6 +207,77 @@ writes a document the rules reject will fail at runtime, not at deploy.
 ```bash
 make app-build-apk                          # app/build/app/outputs/flutter-apk/
 ```
+
+Produces a ~60 MB universal APK containing `arm64-v8a`, `armeabi-v7a` and
+`x86_64`. For distribution, build per-ABI instead — a real phone only needs one:
+
+```bash
+cd app
+flutter build apk --release --split-per-abi   # ~20 MB each
+flutter build appbundle --release             # what Play actually wants
+```
+
+### Three build requirements that are not obvious
+
+Each of these was a real failure during the build, and each has a comment in the
+file that enforces it. They are listed here because the error messages point
+somewhere unhelpful.
+
+**1. `cupertino_icons` must be a dependency.** Nothing in `lib/` references
+`CupertinoIcons`, but the release build's icon tree-shaker still expects the
+font and fails with:
+
+```
+Expected to find fonts for (packages/cupertino_icons/CupertinoIcons, MaterialIcons)
+```
+
+It is the default `flutter create` dependency for exactly this reason.
+
+**2. Core library desugaring must be enabled** in
+`android/app/build.gradle.kts`:
+
+```kotlin
+compileOptions {
+    isCoreLibraryDesugaringEnabled = true
+}
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+}
+```
+
+`flutter_local_notifications` uses `java.time` for alarm scheduling, and the
+failure surfaces as an AAR-metadata error naming the plugin rather than the
+missing flag:
+
+```
+Dependency ':flutter_local_notifications' requires core library desugaring to be enabled
+```
+
+Without it the alternative is raising `minSdk` to 26 to get `java.time` natively.
+
+**3. Do not chase the Gradle / AGP / Kotlin "support will soon be dropped"
+warnings.** The build passes with Gradle 8.14, AGP 8.11.1 and Kotlin 2.2.20 —
+the versions this Flutter SDK generates and is tested against. Upgrading to the
+versions the warning suggests (Gradle 9.1, AGP 9.0.1, Kotlin 2.3.20) **does not
+build**, because AGP 9 turns on `android.newDsl` by default and retires both the
+`android { }` and `kotlinOptions { }` blocks:
+
+```
+'fun Project.android(...)' is deprecated ... will be removed in AGP 10.0
+'fun BaseAppModuleExtension.kotlinOptions(...)' is deprecated
+```
+
+Those warnings are about a *future* Flutter release. Move the versions when
+the SDK templates do.
+
+**4. An unused dependency can dictate your SDK level.** `permission_handler` was
+declared "for the permission flow" but never imported; `geolocator` requests its
+own permissions. Its Android implementation compiles against **SDK 37** and uses
+the AGP 9 Kotlin DSL, so merely depending on it forced `compileSdk = 37` and
+broke the release build. It has been removed, and the current graph's highest
+requirement is the SDK 36 default. If a plugin ever demands a higher
+`compileSdk`, check whether the app actually uses it before raising the level.
+
 
 Signing (not in the repo — `key.properties` and `*.jks` are gitignored):
 

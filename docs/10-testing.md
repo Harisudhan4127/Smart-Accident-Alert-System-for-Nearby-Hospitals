@@ -72,7 +72,7 @@ trustworthy way to prove the loop is gone is to assert the process terminated.
 | `protocol/crc_test.dart` | CRC against published vectors, and parity with the JS reference |
 | `protocol/frame_scanner_test.dart` | The Dart scanner against the same vectors — split frames, noise, bad CRC, corrupt length |
 | `protocol/golden_conformance_test.dart` | Every message type in §4–§10 round-trips; manifest matches the wire |
-| `protocol/telemetry_codec_test.dart` | The 24-byte record: clamping, saturation, `jsRound` parity with JavaScript's `Math.round` |
+| `protocol/telemetry_codec_test.dart` | The 18-byte record: clamping, saturation, `jsRound` parity with JavaScript's `Math.round` |
 | `protocol/messages_test.dart` | HELLO, CONFIG, COMMAND, EVENT, STATUS, HELLO_ACK, CALIB_LOG, DIAG, ACK/ERROR, DEVICE_INFO — including the spec's own ambiguity in §6.8 |
 | `domain/entities_test.dart` | The §18 state machine, accident/contact/hospital invariants |
 
@@ -140,9 +140,9 @@ These need a flashed node. Turn on `SAAS_DBG` in the firmware, or read the
 | 2 | Pair the app | `HELLO_ACK` on the serial monitor within 2 s; app shows "Live" |
 | 3 | Telemetry for 10 min | `DIAG.crcErrors` = 0, `droppedFrames` = 0, heap stable |
 | 4 | Leave range, return | Reconnect within ~2 s (`DIAG` shows a fresh uptime; app shows "Live") |
-| 5 | MPU6050 disconnected | `state` = `FAULT`; app shows a sensor fault, does not crash |
+| 5 | ADXL345 disconnected | `state` = `FAULT`; app shows a sensor fault, does not crash |
 | 6 | OLED disconnected | Node still functions; app reports the capability as absent |
-| 7 | SW-420 disconnected | Detection still works on accel+gyro alone |
+| 7 | SW-420 disconnected | Detection still works on the accelerometer alone |
 | 8 | Press SOS | `MANUAL_SOS` on the node and on the app; countdown is skipped |
 | 9 | `SELFTEST` | `DIAG` with heap, stack high-water and counters |
 | 10 | Power-cycle the node | App reconnects; no event is replayed |
@@ -165,7 +165,7 @@ consistent with a "working" build.
 | 6 | Hard brake at 60 km/h, repeated | **0** alerts (a brake is ~0.5 g, well under threshold) |
 | 7 | Emergency cornering at the limit, repeated | **0** alerts |
 | 8 | Simulated impact (drop the node from 1 m onto concrete) | 1 alert, cancellable within the window |
-| 9 | Roll the vehicle (test ramp or a slow tip) | 1 alert on the gyro/orientation terms |
+| 9 | Roll the vehicle (test ramp or a slow tip) | 1 alert. **Expect this one to be marginal.** With no gyroscope, a roll is only visible as a change in the gravity vector, and only if the vehicle ends up tilted. A roll that ends flat is invisible to the detector, and the SW-420 is the only input that will feel it. |
 | 10 | Actual collision, if it happens to be available | 1 alert within ~1 s |
 | 11 | GPS denied, then a crash | Accident **recorded**, location absent, and the app says so |
 | 12 | Airplane mode, then a crash | Accident **recorded locally**, uploaded when connectivity returns |
