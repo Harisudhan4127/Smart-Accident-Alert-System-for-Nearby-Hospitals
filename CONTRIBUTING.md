@@ -54,7 +54,14 @@ Specifics:
   `!` on a nullable.
 - **C++** — C++17, `constexpr` where possible, **no `String`**, no `malloc` and
   no `printf` in any task or hot path. Guard everything that can be absent (no
-  OLED, no MPU, no SW-420) so the sketch still builds and runs on a bare ESP32.
+  OLED, no accelerometer, no SW-420) so the sketch still builds and runs on a bare
+  ESP32.
+- **Never leave a field at zero as a placeholder for a sensor you do not
+  have.** This is the rule the MPU6050 → ADXL345 change turned on: an earlier
+  revision allocated gyro accumulators it never wrote, and `CALIB_LOG` duly
+  emitted `"gyr_x": 0` on every row. A zero in a telemetry field is not an
+  absence — it is a reading, and a plausible-looking one. Delete the field, bump
+  the protocol version, and let the reader see that it is gone.
 - **Comments earn their place.** A comment that restates the code is noise. One
   that explains why a threshold is 3 g, or why a buffer is a ring rather than a
   list, is the most useful line in the file.
@@ -84,11 +91,12 @@ Specifics:
 Areas: `protocol`, `firmware`, `app`, `backend`, `tools`, `docs`.
 
 ```
-firmware: clamp the gyro threshold to 800 dps
+firmware: clamp the acceleration threshold to 16 g
 
 config.h allowed values the detector divides by, so a slider at the top
 of its range produced a NaN score and silenced the alarm entirely.
-Bounds now match docs/02-ble-protocol.md §6.4.
+Bounds now match the ADXL345's configured full scale and
+docs/02-ble-protocol.md §6.4.
 ```
 
 ## Adding a test

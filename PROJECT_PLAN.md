@@ -4,7 +4,15 @@
 
  The **Smart Accident Alert System for Nearby Hospitals** is an IoT-based accident detection and emergency notification system.
 
- The system uses an **ESP32**, **MPU6050 accelerometer/gyroscope**, and **SW-420 vibration sensor** to detect possible vehicle accidents.
+ The system uses an **ESP32**, an **ADXL345 three-axis accelerometer**, and a **SW-420 vibration sensor** to detect possible vehicle accidents.
+
+ > **Change from the original plan.** This document originally specified an
+ > **MPU6050**, which is a six-axis accelerometer *and* gyroscope. The
+ > implementation uses an **ADXL345**, which is an accelerometer only. There is
+ > therefore **no rotation-rate measurement anywhere in the system**, and nothing
+ > downstream may assume one. Rotation is observed only as a change in the
+ > direction of gravity. The two changes this forces are marked **[ADXL345]** at
+ > each point they affect.
 
  When an accident is detected:
 
@@ -50,7 +58,7 @@
              |                 |
              v                 v
         +---------+       +---------+
-        | MPU6050 |       | SW-420  |
+        | ADXL345 |       | SW-420  |
         +---------+       +---------+
              |                 |
              +--------+--------+
@@ -93,7 +101,7 @@
  | No. | Component | Quantity | Purpose |
 | --- | --- | --- | --- |
 | 1 | ESP32 Development Board | 1 | Main controller |
-| 2 | MPU6050 | 1 | Acceleration and gyroscope sensing |
+| 2 | ADXL345 | 1 | Three-axis acceleration sensing (no gyroscope) **[ADXL345]** |
 | 3 | SW-420 Vibration Sensor | 1 | Vibration/impact detection |
 | 4 | Buzzer | 1 | Local accident warning |
 | 5 | Emergency Push Button | 1 | Manual SOS/cancel |
@@ -156,10 +164,11 @@ Cloud / Emergency Services
 
  | Component | Pin | ESP32 GPIO |
 | --- | --- | --- |
-| MPU6050 | SDA | GPIO 21 |
-| MPU6050 | SCL | GPIO 22 |
-| MPU6050 | VCC | 3.3V |
-| MPU6050 | GND | GND |
+| ADXL345 | SDA | GPIO 21 |
+| ADXL345 | SCL | GPIO 22 |
+| ADXL345 | VCC | 3.3V (VS is **not** 5 V tolerant) |
+| ADXL345 | GND | GND |
+| ADXL345 | SDO | GND for `0x53`; 3V3 for `0x1D` **[ADXL345]** |
 | OLED | SDA | GPIO 21 |
 | OLED | SCL | GPIO 22 |
 | OLED | VCC | 3.3V |
@@ -172,24 +181,37 @@ Cloud / Emergency Services
 
 > Verify the voltage requirements of each module before connecting it to the ESP32.
 
- The MPU6050 and OLED can share the same I²C bus.
+ The ADXL345 and OLED can share the same I²C bus. **[ADXL345]**
+
+ The two addresses must differ: the accelerometer is `0x53` (or `0x1D` if SDO is
+ tied high) and the OLED is `0x3C`. That is two devices; a third will not fit at
+ the default addresses without an I²C multiplexer. The firmware probes `0x53`
+ first and falls back to `0x1D`, and reports the address it settled on.
 
 ---
 
  # 7\. Hardware Block Design
 
- ## MPU6050
+ ## ADXL345 **[ADXL345]**
 
- The MPU6050 provides:
+ The ADXL345 provides:
 
  - X-axis acceleration
 - Y-axis acceleration
 - Z-axis acceleration
-- X-axis gyroscope
-- Y-axis gyroscope
-- Z-axis gyroscope
+
+ It is configured for **±16 g** at a **100 Hz** output rate, in `FULL_RES` mode,
+ which pins the scale at 3.9 mg per LSB on every range.
 
  The accelerometer is primarily used for detecting sudden changes in motion.
+
+ **What it does not provide: rotation rate.** The six gyroscope axes the original
+ MPU6050 specified are gone, and no rotation rate is derived from the
+ accelerometer — differentiating acceleration to manufacture one would produce a
+ number that looks physical and is not. A rollover is instead detected from a
+ change in the *direction* of the measured gravity vector, which is weaker: it
+ only sees a vehicle that ends up tilted, not one that spins and returns to
+ level. **[ADXL345]**
 
  ## SW-420
 
@@ -248,7 +270,7 @@ START
 Initialize sensors
   |
   v
-Read MPU6050
+Read ADXL345
   |
   v
 Read SW-420
@@ -764,7 +786,7 @@ Google Maps
  - Arduino IDE
 - ESP32 board support
 - C/C++
-- MPU6050 library
+- ADXL345 library (Adafruit ADXL345 + Adafruit Unified Sensor)
 - OLED library
 - Bluetooth/BLE support
 
@@ -848,7 +870,7 @@ smart-accident-alert/
  Tasks:
 
  - Connect ESP32.
-- Connect MPU6050.
+- Connect ADXL345.
 - Connect SW-420.
 - Connect OLED.
 - Connect buzzer.
@@ -868,8 +890,9 @@ Working ESP32 prototype
 
  Tasks:
 
- - Read MPU6050 acceleration.
-- Read gyroscope values.
+ - Read ADXL345 acceleration on all three axes.
+- ~~Read gyroscope values.~~ Removed: the ADXL345 has no gyroscope, and no
+  substitute is to be derived. **[ADXL345]**
 - Read SW-420.
 - Display values on Serial Monitor.
 - Display status on OLED.
@@ -889,7 +912,7 @@ Working sensor monitoring
  - Calculate acceleration magnitude.
 - Establish normal-motion values.
 - Establish experimental accident threshold.
-- Combine MPU6050 and SW-420.
+- Combine ADXL345 and SW-420.
 - Add false-alarm protection.
 - Add countdown/cancellation.
 
@@ -1048,7 +1071,7 @@ Complete Smart Accident Alert System
  ## Hardware Tests
 
  - [ ] ESP32 power test
-- [ ] MPU6050 test
+- [ ] ADXL345 test (all three axes; no gyro test — there is no gyro)
 - [ ] SW-420 test
 - [ ] OLED test
 - [ ] Buzzer test
@@ -1170,7 +1193,7 @@ GPS LOCATION UNAVAILABLE
 ```
 1. ESP32
      ↓
-2. MPU6050
+2. ADXL345
      ↓
 3. SW-420
      ↓
@@ -1208,7 +1231,7 @@ GPS LOCATION UNAVAILABLE
 ```
 ESP32
 +
-MPU6050
+ADXL345
 +
 SW-420
 +
@@ -1263,7 +1286,7 @@ STEP 4
 Simulate accident
         ↓
 STEP 5
-MPU6050 + SW-420 detect event
+ADXL345 + SW-420 detect event
         ↓
 STEP 6
 Buzzer + LED activate
@@ -1317,7 +1340,7 @@ Emergency notification demonstrated
        ACCIDENT
            |
            v
-    MPU6050 + SW-420
+    ADXL345 + SW-420
            |
            v
          ESP32

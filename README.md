@@ -1,6 +1,6 @@
 # Smart Accident Alert System for Nearby Hospitals
 
-Detect a vehicle collision with an **ESP32 + MPU6050 + SW-420** node, resolve the
+Detect a vehicle collision with an **ESP32 + ADXL345 + SW-420** node, resolve the
 driver's location from the paired phone, identify the nearest hospitals that can
 actually take an emergency, and alert a human — all inside a cancel window the
 driver can still use for a false alarm.
@@ -38,7 +38,7 @@ driver can still use for a false alarm.
    VEHICLE
       │
       ▼
- ┌─────────────────┐   MPU6050 (accel + gyro)      ┌──────────────┐
+ ┌─────────────────┐   ADXL345 (accel)            ┌──────────────┐
  │      ESP32      │   SW-420   (vibration)    ───►│  Detector    │
  │                 │                                  │  (fused      │
  │  FreeRTOS:      │◄─────────────────────────────────│   scoring)   │
@@ -96,7 +96,7 @@ The three decisions that matter most:
 | # | Component | Qty | ~Cost | Purpose |
 |---|---|---:|---:|---|
 | 1 | ESP32 DevKit (30-pin) | 1 | ₹400 | Main controller, BLE |
-| 2 | MPU6050 IMU | 1 | ₹120 | Acceleration + rotation |
+| 2 | ADXL345 accelerometer | 1 | ₹130 | Acceleration (no gyroscope) |
 | 3 | SW-420 vibration switch | 1 | ₹60 | Impact corroboration |
 | 4 | SSD1306 0.96" OLED (I²C) | 1 | ₹250 | On-device status |
 | 5 | Active buzzer + NPN transistor | 1 | ₹40 | Local audible warning |
@@ -115,7 +115,7 @@ and documented in [`docs/03-hardware-and-wiring.md`](docs/03-hardware-and-wiring
 |---|---|---|
 | Arduino IDE **or** `arduino-cli` | 2.x | Any ESP32 board package works |
 | NimBLE-Arduino | 1.4.x | Lighter and lower-power than Bluedroid |
-| Adafruit MPU6050 / SSD1306 / GFX / BusIO | latest | |
+| Adafruit ADXL345 / SSD1306 / GFX / BusIO | latest | |
 | Flutter | ≥ 3.24 | One codebase → **Android and iOS** |
 | Node.js | ≥ 18 | Protocol tooling and tests only |
 | Firebase CLI *(optional)* | latest | Cloud backend; the app works without it |
@@ -192,7 +192,7 @@ and runs locally — it does not refuse to start.
 │   ├── SmartAccidentAlert.ino   # ← the whole sketch; open this in Arduino IDE
 │   ├── config.h                 # pins, thresholds, timing — tune here
 │   ├── detector.{h,cpp}         # the fused scoring algorithm
-│   ├── sensors.{h,cpp}          # MPU6050 + SW-420 drivers
+│   ├── sensors.{h,cpp}          # ADXL345 + SW-420 drivers
 │   ├── comm.{h,cpp}             # NimBLE GATT server + event sequencing
 │   ├── state_machine.{h,cpp}    # O(1) state dispatch
 │   └── ui.{h,cpp}               # OLED rendering, change-gated
@@ -236,10 +236,10 @@ path, because they have opposite requirements:
 
 | Traffic | Rate | Format | Why |
 |---|---|---|---|
-| Telemetry | 50 Hz | **24-byte binary record** | 7.5× less air-time than JSON, zero parsing, no allocator |
+| Telemetry | 50 Hz | **18-byte binary record** | 8.3× less air-time than JSON, zero parsing, no allocator |
 | Events & control | rare | **UTF-8 JSON** | Readable in nRF Connect when a field goes wrong |
 
-At 50 Hz that is **1.2 KB/s**, versus roughly 9 KB/s for the obvious
+At 50 Hz that is **0.9 KB/s**, versus roughly 9 KB/s for the obvious
 "JSON per sample" design — and the difference is radio time, which on a vehicle
 is battery and, more importantly, a saturated link that drops the *events*.
 
@@ -263,8 +263,7 @@ terms (`firmware/SmartAccidentAlert/detector.cpp`):
 | Signal | What it catches | What suppresses |
 |---|---|---|
 | **Free-fall** (`\|a\| < 0.3 g`) | The single strongest crash indicator | Never occurs for a pothole or a bump |
-| **Gyro magnitude** | Rollover and spin | Smooth cornering stays low |
-| **Attitude change** | Post-crash reorientation | A pothole returns to the same attitude |
+| **Attitude change** | Post-crash reorientation, as a change in the gravity vector | A pothole returns to the same attitude |
 | **Jerk** (`d\|a\|/dt`) | Suddenness, not size | Slow potholes have low jerk |
 | **SW-420** | Physical impact corroboration | Requires the independent sensor to agree |
 | **Z-score vs. rolling baseline** | Adapts to rough roads | A smooth highway uses a stricter bar than a pothole street |
@@ -297,7 +296,7 @@ running navigation, for hours. The engineering log is in
 | | Hospital search O(N) per query | **Spatial grid index**: O(1) cell lookup, O(k) candidates | Measured ~160 µs/query over 320 records |
 | | Search janking the UI | Runs on a **worker isolate**, index transferred once | UI thread never blocks |
 | | Backpressure on telemetry | Drop samples, never grow a queue | O(1) memory, no OOM |
-| **Protocol** | 9 KB/s of JSON telemetry | 24-byte binary record | 1.2 KB/s |
+| **Protocol** | 9 KB/s of JSON telemetry | 18-byte binary record | 0.9 KB/s |
 
 Verified measurements (Dart SDK, 320-record dataset, after JIT warm-up):
 
