@@ -8,16 +8,22 @@
 // synthetic crash, a pothole, a kerb strike, or a dropped device, and assert on
 // the Decision — see tests/sensors/ for the driver.
 //
-// The algorithm is a weighted fusion of seven normalised evidence terms, not a
+// The algorithm is a weighted fusion of six normalised evidence terms, not a
 // threshold comparison:
 //
-//   1. free-fall      |a| < 0.3 g sustained        weight 0.26
-//   2. z-score        accel surprise vs 1 s baseline   0.20
-//   3. SW-420         independent mechanical switch    0.15
-//   4. gyro           rotation during the event        0.12
-//   5. |a|            absolute severity                0.11
-//   6. orientation    gravity-vector rotation          0.10
-//   7. jerk           d|a|/dt                           0.06
+//   1. free-fall      |a| < 0.3 g sustained        weight 0.30
+//   2. z-score        accel surprise vs 1 s baseline   0.23
+//   3. SW-420         independent mechanical switch    0.17
+//   4. |a|            absolute severity                0.13
+//   5. orientation    gravity-vector rotation          0.11
+//   6. jerk           d|a|/dt                           0.06
+//
+// Every term is derived from the ADXL345's three-axis acceleration, from the
+// SW-420 switch, or from their agreement in time. There is no gyroscope in this
+// design, because the sensor has none: rotation is observed only as a change in
+// the direction of gravity, which is what term 5 measures. A previous revision
+// carried a seventh, gyro-only term worth 0.12; its weight was redistributed
+// across the six above so the trip threshold did not move. See config.h.
 //
 // The self-calibrating z-score is what makes the same firmware work on a city
 // speed bump and on a national highway: a fixed 3 g threshold is either useless
@@ -40,8 +46,7 @@ struct Sample {
   // peak and smear the 60 ms free-fall signature. The noise it lets through is
   // handled by the z-score below, which is the correct way to reject an outlier
   // in a noisy signal. See the two-path note in sensors.h.
-  int32_t axMg, ayMg, azMg;  ///< raw acceleration, milli-g
-  int32_t gxDps10, gyDps10, gzDps10;  ///< 2-tap averaged angular rate, 0.1 deg/s
+  int32_t axMg, ayMg, azMg;  ///< raw ADXL345 acceleration, milli-g
   uint16_t magMg;          ///< raw |a|, milli-g
   int32_t jerkMgPerS;      ///< |d|a|/dt| over the last interval, mg/s
   /// Dead-reckoned speed in milli-km/h. 32 bits, not 16: a uint16_t tops out at
@@ -72,8 +77,6 @@ struct Decision {
   uint8_t primed;        ///< 1 once the pre-impact window is full
   uint16_t magMg;        ///< peak |a| seen in the post window
   uint16_t peakAccMg;    ///< session peak |a|
-  uint16_t peakGyrDps;   ///< session peak gyro magnitude, integer deg/s
-  uint16_t gyrMagDps10;  ///< window peak gyro magnitude, 0.1 deg/s
   uint16_t orientDeg10;  ///< gravity rotation across the event, 0.1 degrees
   uint32_t speedMilliKmh;  ///< speed frozen just before the event
   uint16_t jerkMgPerS;    ///< window peak jerk
@@ -84,7 +87,6 @@ struct Decision {
 /// rest of CONFIG (telemetryHz, buzzer, led, mute, autoArm) lives in comm.h.
 struct DetectorCfg {
   uint16_t accelThresholdMg = kCfgAccelThresholdMgDefault;
-  uint16_t gyroThresholdDps10 = kCfgGyroThresholdDpsDefault * 10;
   bool vibrationRequired = kCfgVibrationRequiredDefault;
   uint16_t debounceMs = kCfgDebounceMsDefault;
   uint32_t minSpeedMilliKmh = kCfgMinSpeedMilliKmhDefault;
@@ -153,12 +155,11 @@ class Detector {
   /// Session peak trackers, cleared by COMMAND RESET_STATS.
   void resetStats();
   uint16_t peakAccMg() const { return peakAccMg_; }
-  uint16_t peakGyrDps() const { return peakGyrDps_; }
   uint8_t sw420Hits() const { return sw420Hits_; }
 
   /// Injects a calibration baseline (mean magnitude / mean gravity) captured by
   /// sensors::Calibration. Applied on the next process() call.
-  void seedBaseline(int32_t meanMagQ8, int32_t gx, int32_t gy, int32_t gz);
+  void seedBaseline(int32_t meanMagQ8, int32_t gx, int32_t gy, int32_t gz);  // gravity vector, milli-g
 
  private:
   /// One entry of the rolling pre-impact window. `learnable` is stored per slot
@@ -171,7 +172,6 @@ class Detector {
   };
   /// One entry of the post-impact evidence window.
   struct PostEntry {
-    int32_t gyrMag10;
     int32_t jerk;
     uint16_t magMg;
     uint8_t flags;
@@ -215,7 +215,6 @@ class Detector {
 
   // --- session statistics ----------------------------------------------
   uint16_t peakAccMg_ = 0;
-  uint16_t peakGyrDps_ = 0;
   uint8_t sw420Hits_ = 0;
   uint8_t sw420Last_ = 0;      ///< debounced level from the previous sample
   uint32_t lastSw420Edge_ = 0;  ///< when a rising edge was counted
@@ -223,7 +222,6 @@ class Detector {
 
   // --- window statistics for the current verdict -------------------------
   uint16_t windowPeakMag_ = 0;
-  uint16_t windowPeakGyr10_ = 0;
   uint16_t windowPeakJerk_ = 0;
   int16_t windowPeakZ_ = 0;
   uint8_t windowFreeFall_ = 0;

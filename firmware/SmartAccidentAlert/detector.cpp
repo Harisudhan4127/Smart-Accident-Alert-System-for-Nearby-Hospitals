@@ -41,7 +41,8 @@ constexpr uint16_t kAcosDeg10[129] = {
            0,
 };
 
-/// Integer square root (Newton). Used for Welford sigma and gyro magnitude.
+/// Integer square root (Newton). Used for the Welford sigma and for vector
+/// magnitudes such as |a| and the gravity-vector length.
 uint32_t isqrt64(uint64_t v) {
   if (v == 0) return 0;
   uint64_t x = v;
@@ -112,7 +113,7 @@ Detector::Detector() { reset(); }
 
 void Detector::reset() {
   for (uint8_t i = 0; i < kPreWindowN; i++) pre_[i] = PreEntry{0, 0, 0, 0, 0};
-  for (uint8_t i = 0; i < kPostWindowN; i++) post_[i] = PostEntry{0, 0, 0, 0};
+  for (uint8_t i = 0; i < kPostWindowN; i++) post_[i] = PostEntry{0, 0, 0};
   preHead_ = 0;
   preCount_ = 0;
   postHead_ = 0;
@@ -127,7 +128,6 @@ void Detector::reset() {
   candidateSince_ = 0;
   lastNowMs_ = 0;
   windowPeakMag_ = 0;
-  windowPeakGyr10_ = 0;
   windowPeakJerk_ = 0;
   windowPeakZ_ = 0;
   windowFreeFall_ = 0;
@@ -140,7 +140,6 @@ void Detector::reset() {
 
 void Detector::resetStats() {
   peakAccMg_ = 0;
-  peakGyrDps_ = 0;
   sw420Hits_ = 0;
   sw420Last_ = 0;
   lastSw420Edge_ = 0;
@@ -219,7 +218,7 @@ void Detector::pushPre(const Sample& s) {
 }
 
 void Detector::pushPost(const Sample& s) {
-  const PostEntry e{mag3(s.gxDps10, s.gyDps10, s.gzDps10), s.jerkMgPerS, s.magMg, s.flags};
+  const PostEntry e{s.jerkMgPerS, s.magMg, s.flags};
   post_[postHead_] = e;
   postHead_ = static_cast<uint8_t>((postHead_ + 1) % kPostWindowN);
   if (postCount_ < kPostWindowN) postCount_++;
@@ -255,15 +254,10 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
   pushPost(s);
 
   if (s.magMg > peakAccMg_) peakAccMg_ = s.magMg;
-  const int32_t gyrNow10 = mag3(s.gxDps10, s.gyDps10, s.gzDps10);
-  if (gyrNow10 > static_cast<int32_t>(peakGyrDps_) * 10) {
-    peakGyrDps_ = static_cast<uint16_t>((gyrNow10 + 5) / 10);
-  }
 
   const bool primed = (preCount_ >= kPreWindowN) && (s.flags & kSfSensorOk) != 0;
   d.primed = primed ? 1u : 0u;
   d.peakAccMg = peakAccMg_;
-  d.peakGyrDps = peakGyrDps_;
   d.sw420Hits = sw420Hits_;
 
   if (!primed || !cfg_.armed) {
@@ -289,7 +283,6 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
 
   // --- aggregate the post-impact evidence window -------------------------
   uint16_t peakMag = 0;
-  uint16_t peakGyr10 = 0;
   uint16_t peakJerk = 0;
   uint16_t ffSamples = 0;
   bool sawSw420 = (lastSw420High_ != 0) && (nowMs - lastSw420High_ <= kSw420HoldMs);
@@ -305,7 +298,6 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
   for (uint8_t i = 0; i < postCount_; i++, idx = static_cast<uint8_t>((idx + 1) % kPostWindowN)) {
     const PostEntry& e = post_[idx];
     if (e.magMg > peakMag) peakMag = e.magMg;
-    if (e.gyrMag10 > static_cast<int32_t>(peakGyr10)) peakGyr10 = static_cast<uint16_t>(e.gyrMag10);
     if (e.jerk > static_cast<int32_t>(peakJerk)) peakJerk = static_cast<uint16_t>(clamp32(e.jerk, 0, 65535));
     if (e.flags & kSfFreeFall) ffSamples++;
     if (e.flags & kSfSw420) sawSw420 = true;
@@ -344,7 +336,6 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
   const int32_t tFreeFall = freeFall ? 1000 : 0;
   const int32_t tZ = ramp(zMilli, knee::kZOnMilli, knee::kZFullMilli);
   const int32_t tSw420 = sawSw420 ? 1000 : 0;
-  const int32_t tGyro = ramp(peakGyr10, static_cast<int32_t>(cfg_.gyroThresholdDps10), knee::kGyroFullDps10);
   const int32_t tAbsMag = ramp(peakMag, static_cast<int32_t>(cfg_.accelThresholdMg), knee::kAbsFullMg);
   const int32_t tOrient = ramp(orientDeg10, knee::kOrientOnDeg10, knee::kOrientFullDeg10);
   const int32_t tJerk = ramp(peakJerk, knee::kJerkOnMgPerS, knee::kJerkFullMgPerS);
@@ -352,7 +343,6 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
   const int32_t acc = tFreeFall * static_cast<int32_t>(wt::kFreeFall) +
                       tZ * static_cast<int32_t>(wt::kZScore) +
                       tSw420 * static_cast<int32_t>(wt::kSw420) +
-                      tGyro * static_cast<int32_t>(wt::kGyro) +
                       tAbsMag * static_cast<int32_t>(wt::kAbsMag) +
                       tOrient * static_cast<int32_t>(wt::kOrient) +
                       tJerk * static_cast<int32_t>(wt::kJerk);
@@ -362,8 +352,8 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
   int32_t score = (acc * 100) / (static_cast<int32_t>(wt::kSum) * 1000);
   score = (score * static_cast<int32_t>(cfg_.gainMilli)) / 1000;
   score = clamp32(score, 0, 100);
-  DET_TRACE("t=%u ff=%d z=%d sw=%d gyr=%d abs=%d ori=%d jrk=%d -> score=%d\n", nowMs,
-            tFreeFall, tZ, tSw420, tGyro, tAbsMag, tOrient, tJerk, score);
+  DET_TRACE("t=%u ff=%d z=%d sw=%d abs=%d ori=%d jrk=%d -> score=%d\n", nowMs,
+            tFreeFall, tZ, tSw420, tAbsMag, tOrient, tJerk, score);
 
   // --- corroboration gates ------------------------------------------------
   // Applied *before* the trip decision so a suppressed event is never latched
@@ -432,7 +422,6 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
 
   // --- publish window statistics -----------------------------------------
   windowPeakMag_ = peakMag;
-  windowPeakGyr10_ = peakGyr10;
   windowPeakJerk_ = peakJerk;
   windowPeakZ_ = static_cast<int16_t>(zMilli);
   windowFreeFall_ = freeFall ? 1u : 0u;
@@ -442,7 +431,6 @@ Decision Detector::process(const Sample& s, uint32_t nowMs) {
   d.score = static_cast<uint8_t>(score);
   lastScore_ = d.score;
   d.magMg = peakMag;
-  d.gyrMagDps10 = peakGyr10;
   d.orientDeg10 = windowOrientDeg10_;
   d.speedMilliKmh = windowSpeedMilli_;
   d.jerkMgPerS = windowPeakJerk_;
@@ -458,7 +446,6 @@ void Detector::unfreeze(uint32_t nowMs) {
   candidateSince_ = 0;
   aboveSince_ = 0;
   windowPeakMag_ = 0;
-  windowPeakGyr10_ = 0;
   windowPeakJerk_ = 0;
   windowPeakZ_ = 0;
   windowFreeFall_ = 0;
