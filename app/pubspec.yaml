@@ -18,7 +18,7 @@
 # needed. `lib/core/logger.dart` explains the no-`print` rule.
 name: smart_accident_alert
 description: >-
-  IoT accident-alert system: pairs with an ESP32 + MPU6050 + SW-420 node over a
+  IoT accident-alert system: pairs with an ESP32 + ADXL345 + SW-420 node over a
   frozen BLE protocol, resolves nearby hospitals, and dispatches emergency alerts
   to contacts and the cloud. Works fully offline (PROJECT_PLAN §25).
 publish_to: "none"
@@ -70,11 +70,22 @@ dependencies:
   # rationale / "open app settings" UX that geolocator's API does not model.
   geolocator: ^14.0.2
 
-  # Runtime permission flow for location (fine + background), Bluetooth scan/connect
-  # (Android 12+ BLUETOOTH_SCAN/CONNECT are runtime permissions) and notifications
-  # (Android 13+ POST_NOTIFICATIONS). Also provides openAppSettings() for the
-  # permanently-denied path.
-  permission_handler: ^13.0.2
+  # NOTE: permission_handler is deliberately NOT a dependency.
+  #
+  # Nothing in lib/ imports it. It was originally declared for the runtime
+  # permission flow, but every permission this app needs is already requested by
+  # the plugin that needs it:
+  #
+  #   * location           -> geolocator (Geolocator.requestPermission)
+  #   * Bluetooth scan/connect -> flutter_blue_plus, via the AndroidManifest
+  #     BLUETOOTH_SCAN / BLUETOOTH_CONNECT declarations
+  #   * notifications      -> flutter_local_notifications
+  #
+  # Keeping it cost more than it bought: its Android implementation
+  # (permission_handler_android 14.x) compiles against SDK 37 and uses the AGP 9
+  # `kotlin { compilerOptions { } }` DSL, so merely depending on it forced
+  # compileSdk 37 and broke the release build on AGP 8.11. An unused dependency
+  # should not be able to dictate the SDK level.
 
   # ---------------------------------------------------------------- cloud
   # Firebase bootstrap. Keeping this explicit (rather than a transitive dep) makes
@@ -138,6 +149,13 @@ dependencies:
   # depend on the platform having a nice default font, and so we can ship one
   # tabular-figure cut (see core/theme/typography.dart).
   google_fonts: ^8.1.0
+
+  # The Cupertino icon font. Nothing in lib/ references CupertinoIcons, but the
+  # release build's icon tree-shaker still expects the font when any dependency
+  # declares an IconData from it, and a release build fails with
+  #   "Expected to find fonts for (packages/cupertino_icons/CupertinoIcons, ...)"
+  # without it. It is the default `flutter create` dependency for this reason.
+  cupertino_icons: ^1.0.8
 
   # Icons that are not in the Material icon font (vehicle/sensor/alert glyphs).
   flutter_svg: ^2.3.0
