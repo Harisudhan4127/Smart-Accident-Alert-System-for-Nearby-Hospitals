@@ -262,7 +262,7 @@ describe('framing oracle (docs/02 §4)', () => {
 
   test('scans 10,000 frames in linear time', () => {
     const sample = buildFrame(Type.TELEMETRY, encodeTelemetry({
-      tMs: 1234, ax: 10, ay: -20, az: 995, gx: 1, gy: 2, gz: 3,
+      tMs: 1234, ax: 10, ay: -20, az: 995,
       magMg: 1000, peakMg: 0, flags: Flag.ARMED, score: 0,
       batteryPct: 90, state: State.IDLE,
     }));
@@ -297,7 +297,10 @@ describe('framing oracle (docs/02 §4)', () => {
 
 describe('golden.json frame vectors', () => {
   test('the committed manifest is complete', () => {
-    assert.equal(golden.protocolVersion, 1);
+    // Asserted against the codec, not a literal: the point of this check is that
+    // the committed manifest describes the wire format the codec actually emits.
+    assert.equal(golden.protocolVersion, PROTOCOL_VERSION);
+    assert.equal(golden.constants.TELEMETRY_SIZE, TELEMETRY_SIZE);
     assert.equal(golden.generatedFrom, 'tools/protocol/codec.js');
     assert.ok(golden.vectors.length >= 10, 'expected the full vector set');
     for (const v of golden.vectors) {
@@ -462,7 +465,6 @@ describe('golden.json internal consistency', () => {
     const decoded = decodeTelemetry(truePayloadOf(hexToBytes(v.frameHex)));
     assert.equal(decoded.ay, -32768, 'negative saturation lands on the minimum');
     assert.equal(decoded.ax, 32767, 'positive saturation lands on the maximum');
-    assert.equal(decoded.gx, -32768);
     assert.equal(clampI16(-99999), -32768, 'clamp, not two\'s-complement wraparound');
     assert.equal(clampI16(99999), 32767);
     assert.equal(v.telemetry.ay, decoded.ay, 'the manifest records the clamped value');
@@ -547,7 +549,7 @@ describe('decodeFrame and parseJsonFrame', () => {
   test('describeFrame summarises both telemetry and JSON frames', () => {
     // Fed through the oracle, not decodeFrame: D3 would shift the record.
     const record = encodeTelemetry({
-      tMs: 5, ax: 0, ay: 0, az: 1000, gx: 0, gy: 0, gz: 0,
+      tMs: 5, ax: 0, ay: 0, az: 1000,
       magMg: 1000, peakMg: 0, flags: 0, score: 0, batteryPct: 100, state: State.IDLE,
     });
     const t = describeFrame(new SpecScanner().push(encodeFrame(Type.TELEMETRY, record))[0]);
@@ -572,21 +574,23 @@ describe('decodeFrame and parseJsonFrame', () => {
 
 describe('telemetry record codec', () => {
   const base = {
-    tMs: 423119, ax: 120, ay: -45, az: 998, gx: 23, gy: -11, gz: 7,
+    tMs: 423119, ax: 120, ay: -45, az: 998,
     magMg: 1004, peakMg: 4820, flags: Flag.ARMED, score: 0,
     batteryPct: 96, state: State.IDLE,
   };
 
-  test('a record is exactly 24 bytes with a defined field order', () => {
-    assert.equal(TELEMETRY_SIZE, 24);
-    assert.equal(encodeTelemetry(base).length, 24);
+  test('a record is exactly 18 bytes with a defined field order', () => {
+    // 18 = tMs(4) + ax/ay/az(6) + mag/peak(4) + flags/score/battery/state(4).
+    // The six gyro bytes present in v1 are gone, not zero-filled.
+    assert.equal(TELEMETRY_SIZE, 18);
+    assert.equal(encodeTelemetry(base).length, 18);
   });
 
   test('round-trips every field', () => {
     assert.deepEqual(decodeTelemetry(encodeTelemetry(base)), { ...base, ...flagView(Flag.ARMED), stateName: 'IDLE' });
   });
 
-  test('accel and gyro are signed 16-bit, magnitude and peak unsigned', () => {
+  test('accel is signed 16-bit, magnitude and peak unsigned', () => {
     const t = decodeTelemetry(encodeTelemetry({ ...base, ax: -32768, ay: 32767, magMg: 65535, peakMg: 0 }));
     assert.equal(t.ax, -32768);
     assert.equal(t.ay, 32767);
@@ -598,18 +602,18 @@ describe('telemetry record codec', () => {
     assert.equal(decodeTelemetry(encodeTelemetry({ ...base, tMs: 4294967295 })).tMs, 4294967295);
   });
 
-  test('fractional milli-g and deg/s are rounded, not truncated', () => {
-    const t = decodeTelemetry(encodeTelemetry({ ...base, ax: 120.6, gy: -11.4, magMg: 1004.5 }));
+  test('fractional milli-g is rounded, not truncated', () => {
+    const t = decodeTelemetry(encodeTelemetry({ ...base, ax: 120.6, ay: -11.4, magMg: 1004.5 }));
     assert.equal(t.ax, 121);
-    assert.equal(t.gy, -11);
+    assert.equal(t.ay, -11);
     assert.equal(t.magMg, 1005);
   });
 
   test('out-of-range inputs are clamped rather than wrapped', () => {
-    const t = decodeTelemetry(encodeTelemetry({ ...base, ax: 99999, ay: -99999, gz: 70000, magMg: 70000, peakMg: -5, score: 300, batteryPct: 300, state: 9 }));
+    const t = decodeTelemetry(encodeTelemetry({ ...base, ax: 99999, ay: -99999, az: 70000, magMg: 70000, peakMg: -5, score: 300, batteryPct: 300, state: 9 }));
     assert.equal(t.ax, 32767);
     assert.equal(t.ay, -32768);
-    assert.equal(t.gz, 32767);
+    assert.equal(t.az, 32767);
     assert.equal(t.magMg, 65535);
     assert.equal(t.peakMg, 0);
     assert.equal(t.score, 255);
@@ -630,7 +634,9 @@ describe('telemetry record codec', () => {
   });
 
   test('a short record is refused', () => {
-    assert.throws(() => decodeTelemetry(new Uint8Array(23)), RangeError);
+    // One byte under the record size, so this tracks TELEMETRY_SIZE rather than
+    // a literal that stops testing anything when the layout changes.
+    assert.throws(() => decodeTelemetry(new Uint8Array(TELEMETRY_SIZE - 1)), RangeError);
   });
 
   test('clamps are exported and total', () => {
@@ -652,7 +658,7 @@ describe('telemetry record codec', () => {
 
 function flagView(flags) {
   const t = decodeTelemetry(encodeTelemetry({
-    tMs: 0, ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0, magMg: 0, peakMg: 0,
+    tMs: 0, ax: 0, ay: 0, az: 0, magMg: 0, peakMg: 0,
     flags, score: 0, batteryPct: 0, state: 0,
   }));
   return {
@@ -790,7 +796,7 @@ describe('FrameScanner conforms to the spec', () => {
 
   test('D3: describeFrame reports the true uptime for a telemetry frame', () => {
     const encoded = encodeFrame(Type.TELEMETRY, encodeTelemetry({
-      tMs: 5, ax: 0, ay: 0, az: 1000, gx: 0, gy: 0, gz: 0,
+      tMs: 5, ax: 0, ay: 0, az: 1000,
       magMg: 1000, peakMg: 0, flags: 0, score: 0, batteryPct: 100, state: State.IDLE,
     }));
     assert.match(describeFrame(decodeFrame(encoded)), /t=5ms/);
