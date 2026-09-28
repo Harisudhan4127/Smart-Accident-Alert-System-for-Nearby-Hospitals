@@ -11,6 +11,9 @@
 // Wire and IRAM_ATTR, all of which the acquisition layer below needs.
 #include <Arduino.h>
 #include <Wire.h>
+
+// The accelerometer driver. Kept to the one file that talks to the part.
+#include <Adafruit_ADXL345_U.h>
 #endif
 
 namespace saas {
@@ -41,8 +44,7 @@ int32_t clampi(int32_t v, int32_t lo, int32_t hi) {
 // Calibrator
 // ---------------------------------------------------------------------------
 
-void Calibrator::add(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxDps10, int32_t gyDps10,
-                     int32_t gzDps10, bool sw420) {
+void Calibrator::add(int32_t axMg, int32_t ayMg, int32_t azMg, bool sw420) {
   const int32_t mag = mag3i(axMg, ayMg, azMg);
   const int32_t x = mag << 8;  // Q8, matching the detector's scale
   if (n_ == 0) {
@@ -55,9 +57,9 @@ void Calibrator::add(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxDps10, 
     m2_ += static_cast<int64_t>(d) * (x - meanQ8_);
     if (m2_ < 0) m2_ = 0;
   }
-  gxSum_ += axMg;
-  gySum_ += ayMg;
-  gzSum_ += azMg;
+  xSum_ += axMg;
+  ySum_ += ayMg;
+  zSum_ += azMg;
 
   // Store a decimated history for CALIB_LOG. kCalibMaxSamples is 48 and a 5 s
   // calibration at 50 Hz is 250 samples, so keep every 5th.
@@ -67,6 +69,7 @@ void Calibrator::add(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxDps10, 
       histX_[histN_] = axMg;
       histY_[histN_] = ayMg;
       histZ_[histN_] = azMg;
+      histSw_[histN_] = sw420 ? 1u : 0u;
       histN_++;
     }
   }
@@ -91,9 +94,6 @@ uint8_t Calibrator::drainFrom(uint16_t start, uint8_t maxOut, json::CalibSampleV
     out[i].accX = static_cast<int16_t>(clampi(histX_[k], -32768, 32767));
     out[i].accY = static_cast<int16_t>(clampi(histY_[k], -32768, 32767));
     out[i].accZ = static_cast<int16_t>(clampi(histZ_[k], -32768, 32767));
-    out[i].gyrX = static_cast<int16_t>(clampi(histGx_[k], -32768, 32767));
-    out[i].gyrY = static_cast<int16_t>(clampi(histGy_[k], -32768, 32767));
-    out[i].gyrZ = static_cast<int16_t>(clampi(histGz_[k], -32768, 32767));
     out[i].sw420 = histSw_[k] != 0;
   }
   return n;
@@ -213,7 +213,6 @@ bool Sw420::update(bool rawLevel, uint32_t nowMs) {
 
 void SensorPipeline::reset() {
   maAx_.reset(); maAy_.reset(); maAz_.reset();
-  maGx_.reset(); maGy_.reset(); maGz_.reset();
   lpAx_.reset(); lpAy_.reset(); lpAz_.reset();
   grav_.reset();
   speed_.reset();
@@ -231,10 +230,8 @@ void SensorPipeline::reset() {
   primed_ = false;
 }
 
-void SensorPipeline::prime(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxDps10,
-                           int32_t gyDps10, int32_t gzDps10) {
+void SensorPipeline::prime(int32_t axMg, int32_t ayMg, int32_t azMg) {
   maAx_.reset(axMg); maAy_.reset(ayMg); maAz_.reset(azMg);
-  maGx_.reset(gxDps10); maGy_.reset(gyDps10); maGz_.reset(gzDps10);
   Biquad::configure5Hz(lpAx_); lpAx_.reset(axMg);
   Biquad::configure5Hz(lpAy_); lpAy_.reset(ayMg);
   Biquad::configure5Hz(lpAz_); lpAz_.reset(azMg);
@@ -245,11 +242,13 @@ void SensorPipeline::prime(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxD
 }
 
 int32_t SensorPipeline::accelMg(int16_t raw) {
-  return (static_cast<int32_t>(raw) * 1000) / kAccelLsbPerG;
-}
-
-int32_t SensorPipeline::gyroDps10(int16_t raw) {
-  return (static_cast<int32_t>(raw) * 10000) / kGyroLsbPerDps;
+  // ADXL345: 13 significant bits left-justified in a 16-bit register, 3.9 mg per
+  // LSB in FULL_RES. The shift strips the padding (and preserves the sign,
+  // because the raw type is signed and the compiler is not allowed to assume
+  // otherwise for a right shift on a negative value -- the explicit cast to
+  // int32_t plus the sign-extension is what makes this defined behaviour).
+  const int32_t counts = static_cast<int32_t>(raw) >> kAdxlRawShift;
+  return (counts * kAdxlMilliTenthsPerLsb) / 10;
 }
 
 void SensorPipeline::beginCalibration(uint32_t nowMs, uint16_t durationMs) {
@@ -270,7 +269,7 @@ bool SensorPipeline::calibrationDone(uint32_t nowMs) const {
 
 void SensorPipeline::applyCalibration() {
   calibrating_ = false;
-  const int32_t gx = calib_.meanGx(), gy = calib_.meanGy(), gz = calib_.meanGz();
+  const int32_t gx = calib_.meanAxMg(), gy = calib_.meanAyMg(), gz = calib_.meanAzMg();
   grav_.seed(gx, gy, gz);
   speed_.configureForwardFromGravity(gx, gy, gz);
   speedValid_ = speed_.valid();
@@ -289,7 +288,7 @@ bool SensorPipeline::step(uint32_t nowMs, const RawSample& in, Sample& out) {
   if (!in.sensorOk) {
     // A fault is not a quiet vehicle. Report the fault with kSfSensorOk clear so
     // the detector refuses to score (primed == 0) and STATUS can raise the red
-    // LED, instead of a dead MPU looking like a smooth drive.
+    // LED, instead of a dead accelerometer looking like a smooth drive.
     ffRun_ = 0;
     ffOffRun_ = 0;
     ffLatched_ = false;
@@ -297,14 +296,11 @@ bool SensorPipeline::step(uint32_t nowMs, const RawSample& in, Sample& out) {
   }
   out.flags |= kSfSensorOk;
 
-  if (!primed_) prime(in.axMg, in.ayMg, in.azMg, in.gxDps10, in.gyDps10, in.gzDps10);
+  if (!primed_) prime(in.axMg, in.ayMg, in.azMg);
 
   // --- fast path: the impact evidence, unfiltered ------------------------
   // raw mag for |a|, free fall, jerk, the z-score, and the orientation vector.
   const int32_t fax = in.axMg, fay = in.ayMg, faz = in.azMg;
-  const int32_t gx = maGx_.push(in.gxDps10);
-  const int32_t gy = maGy_.push(in.gyDps10);
-  const int32_t gz = maGz_.push(in.gzDps10);
   const int32_t mag = mag3i(fax, fay, faz);
 
   // Free fall: sustained |a| below 0.3 g. Counted, not instantaneous, because a
@@ -349,9 +345,6 @@ bool SensorPipeline::step(uint32_t nowMs, const RawSample& in, Sample& out) {
   out.axMg = fax;
   out.ayMg = fay;
   out.azMg = faz;
-  out.gxDps10 = gx;
-  out.gyDps10 = gy;
-  out.gzDps10 = gz;
   out.magMg = static_cast<uint16_t>(clampi(mag, 0, 65535));
   out.jerkMgPerS = jerk;
   out.speedMilliKmh = speed_.milliKmh();
@@ -361,7 +354,7 @@ bool SensorPipeline::step(uint32_t nowMs, const RawSample& in, Sample& out) {
     // The SLOW-path accel: the calibration baseline must be the same filtered
     // signal the gravity tracker and speed integrator see, or the baseline the
     // app plots is not the one the firmware uses.
-    calib_.add(sax, say, saz, gx, gy, gz, swLevel_ != 0);
+    calib_.add(sax, say, saz, swLevel_ != 0);
   }
 
   return true;
@@ -425,82 +418,93 @@ void attachSw420Interrupt(Sw420& sw) {
 
 void SensorPipeline::attachInterrupts() { attachSw420Interrupt(sw_); }
 
-bool Mpu6050::writeReg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(addr_);
-  Wire.write(reg);
-  Wire.write(val);
-  if (Wire.endTransmission() != 0) {
-    errors_++;
-    return false;
-  }
-  return true;
-}
+// The ADXL345 driver. All Arduino/I2C specifics are confined to this block;
+// the host build above never sees them, which is what lets the whole signal
+// chain be unit-tested without a bus.
 
-bool Mpu6050::readRegs(uint8_t reg, uint8_t* buf, size_t n) {
-  Wire.beginTransmission(addr_);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) {  // repeated start
-    errors_++;
-    return false;
-  }
-  const size_t got = Wire.requestFrom(addr_, static_cast<uint8_t>(n), static_cast<uint8_t>(n));
-  if (got != n) {
-    errors_++;
-    return false;
-  }
-  for (size_t i = 0; i < n; i++) buf[i] = static_cast<uint8_t>(Wire.read());
-  return true;
-}
+Adxl345::~Adxl345() { delete dev_; }
 
-bool Mpu6050::begin(uint8_t addr) {
-  addr_ = addr;
+bool Adxl345::begin(uint8_t addr) {
   present_ = false;
-  uint8_t id = 0;
-  if (!readRegs(0x75, &id, 1)) return false;
-  // 0x68/0x69/0x70/0x71/0x73 are all MPU-6050 (the 0x69 and 0x73 parts are the
-  // same die with a different AD0 strap). Rejecting the wrong id here means a
-  // floating bus cannot masquerade as a working sensor.
-  const bool ok = (id == 0x68 || id == 0x69 || id == 0x70 || id == 0x71 || id == 0x73);
-  if (!ok) return false;
-  who_ = id;
+  devId_ = 0;
+
+  dev_ = new Adafruit_ADXL345_Unified();
+
+  // Probe the primary address, then the alternate. Two ADXL345s cannot coexist
+  // with the OLED on one bus at 0x53/0x1D/0x3C, so a failure at the default
+  // address almost always means SDO is strapped the other way -- and saying so
+  // is far more useful than reporting "no sensor".
+  if (!dev_->begin(addr)) {
+    if (addr == kAdxlAddr && dev_->begin(kAdxlAddrAlt)) {
+      addr_ = kAdxlAddrAlt;
+    } else {
+      // Count the probes as bus errors: they are real I2C traffic that failed,
+      // and DIAG should reflect that a sensor was expected and not found.
+      errors_ += 2;
+      delete dev_;
+      dev_ = nullptr;
+      return false;
+    }
+  }
+
+  devId_ = dev_->getDeviceID();
+  if (devId_ != 0xE5) {
+    // The library already checked this, so reaching it means something is
+    // answering that is not an ADXL345.
+    errors_++;
+    delete dev_;
+    dev_ = nullptr;
+    return false;
+  }
+
+  // setRange() also sets FULL_RES, which pins the scale at 3.9 mg/LSB on every
+  // range -- that is what makes accelMg() a pure shift-and-multiply.
+  dev_->setRange(static_cast<range_t>(kAdxlRange16G));
+  dev_->setDataRate(static_cast<dataRate_t>(kAdxlOdr));
+  // The datasheet asks for 100 ms between power-on and the first valid sample.
+  // vTaskDelay rather than delay() so the scheduler keeps servicing BLE: a
+  // blocking 100 ms at boot is long enough for a phone to time the link out.
+  vTaskDelay(pdMS_TO_TICKS(120));
+
   present_ = true;
-  setRanges(kMpuAccelRangeG, kMpuGyroRangeDps);
-  writeReg(0x6A, 0x00);  // USER_CTRL: disable FIFO and I2C master
-  writeReg(0x6B, 0x01);  // PWR_MGMT_1: wake, PLL with X gyro as the clock reference
-  vTaskDelay(2);        // the datasheet asks for 100 ms after a reset; the part
-                        // is already running, this is just settling time.
   return true;
 }
 
-void Mpu6050::setRanges(int8_t accelG, int16_t gyroDps) {
-  uint8_t a = 0x00;
-  if (accelG == 2) a = 0x08;
-  else if (accelG == 4) a = 0x10;
-  else if (accelG == 8) a = 0x18;
-  writeReg(0x1B, a);
-  uint8_t g = 0x00;
-  if (gyroDps == 250) g = 0x08;
-  else if (gyroDps == 500) g = 0x10;
-  else if (gyroDps == 1000) g = 0x18;
-  else if (gyroDps == 2000) g = 0x20;
-  writeReg(0x1C, g);
-  writeReg(0x1A, kMpuDlpf);
-}
+bool Adxl345::read(int32_t& axMg, int32_t& ayMg, int32_t& azMg) {
+  if (dev_ == nullptr || !present_) return false;
 
-bool Mpu6050::read(int16_t& ax, int16_t& ay, int16_t& az, int16_t& gx, int16_t& gy, int16_t& gz) {
-  uint8_t b[14];
-  // One burst from ACCEL_XOUT_H so all six axes are the same instant. Two
-  // transactions 400 us apart can fabricate angular rate that never happened.
-  if (!readRegs(0x3B, b, sizeof(b))) return false;
-  auto be16 = [&](int i) -> int16_t {
-    return static_cast<int16_t>((static_cast<uint16_t>(b[i]) << 8) | b[i + 1]);
-  };
-  ax = be16(0);
-  ay = be16(2);
-  az = be16(4);
-  gx = be16(8);
-  gy = be16(10);
-  gz = be16(12);
+  // The part's data registers do not auto-increment on a read, so each axis is
+  // its own 2-byte transaction. That is three short transactions per tick; at
+  // 50 Hz on a 400 kHz bus it is a few hundred microseconds, and the three axes
+  // land well inside one millisecond of each other -- far tighter than any
+  // motion the detector's thresholds react to. A single 6-byte burst would be
+  // marginally tighter still, and is not worth hand-rolling register access that
+  // the library already owns.
+  const int16_t rawX = dev_->getX();
+  const int16_t rawY = dev_->getY();
+  const int16_t rawZ = dev_->getZ();
+
+  // A parked bus reads as a constant, usually the last good sample. If all three
+  // axes are byte-identical across consecutive reads the part has almost
+  // certainly stopped responding, and reporting that as a sensor fault is very
+  // different from reporting it as a still vehicle. Cheap to detect, and it
+  // stops a dead sensor looking like a calm one.
+  if (rawX == lastX_ && rawY == lastY_ && rawZ == lastZ_) {
+    if (++frozenRuns_ >= kAdxlFrozenRuns) {
+      errors_++;
+      frozenRuns_ = 0;
+      return false;
+    }
+  } else {
+    frozenRuns_ = 0;
+  }
+  lastX_ = rawX;
+  lastY_ = rawY;
+  lastZ_ = rawZ;
+
+  axMg = SensorPipeline::accelMg(rawX);
+  ayMg = SensorPipeline::accelMg(rawY);
+  azMg = SensorPipeline::accelMg(rawZ);
   return true;
 }
 

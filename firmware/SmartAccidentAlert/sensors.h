@@ -1,4 +1,4 @@
-// sensors.h — MPU6050 acquisition, input conditioning, and the signals the
+// sensors.h — ADXL345 acquisition, input conditioning, and the signals the
 // detector consumes.
 //
 // Split of responsibilities, and why: the *signal chain* (filters, free-fall,
@@ -6,8 +6,8 @@
 // Arduino header, so it can be driven and verified on a host exactly as the
 // detector is. The *acquisition* layer (I2C, interrupts, millis) lives in
 // sensors.cpp behind `#if defined(ARDUINO)`. That means the arithmetic that decides
-// whether an ambulance is called can be unit-tested without a bus, an MPU, or a
-// simulator.
+// whether an ambulance is called can be unit-tested without a bus, a sensor, or
+// a simulator.
 //
 // Signal chain, in order:
 //
@@ -15,11 +15,14 @@
 //    |                                                          |
 //    +--> moving average (4) --> biquad LPF (5 Hz) --> gravity  |
 //                                    |        tracker (1 s IIR) |
-//   gyro --> moving average (2) ----------------------------> detector (fast)
-//                                    |
-//                            linear accel --> forward projection
-//                                                    |
-//                                            dead-reckoned speed (speed gate)
+//                                    |                             |
+//                                    +--> tilt vector --> gravity-  |
+//                                           vector rotation       |
+//                                           (orientation term)    |
+//    |                                                             |
+//    +--> linear accel --> forward projection                      |
+//                 |                                                  |
+//         dead-reckoned speed (speed gate) <-------------------------+
 //
 // TWO PATHS, AND WHY. The impact evidence is deliberately NOT filtered. A 5 Hz
 // second-order section has roughly 30 ms of group delay, and measured against a
@@ -34,8 +37,13 @@
 // statistically instead: the detector's z-score compares the peak against a
 // rolling mean and variance of the same unfiltered magnitude, which is the
 // textbook way to detect an outlier in a noisy signal. Quantisation is not a
-// concern at this scale anyway -- 1 LSB is 1000/16384 = 0.06 mg -- and the
-// MPU's own 44 Hz DLPF is the anti-aliaser for its 1 kHz internal rate.
+// concern at this scale anyway -- 1 LSB is 3.9 mg with the ADXL345 in FULL_RES
+// -- and the part's own 100 Hz output rate is the anti-aliaser.
+//
+// There is no gyro path, and no rotation-rate path of any kind: the ADXL345 is an
+// accelerometer. Orientation change is still available, because it is derived
+// from the gravity vector that the accelerometer measures, and that is enough to
+// see a rollover.
 //
 // The 5 Hz biquad earns its place on the *slow* path, where it does what a
 // low-pass is actually good at: it isolates gravity. Orientation change, the
@@ -49,6 +57,17 @@
 #include "config.h"
 #include "detector.h"
 #include "json.h"  // json::CalibSampleView, the CALIB_LOG wire record
+
+// Forward declaration of the accelerometer driver's class, at *global* scope.
+//
+// This must not be written as `class Adafruit_ADXL345_Unified*` inside the
+// namespace below: that declares a brand-new class called
+// `saas::Adafruit_ADXL345_Unified` instead of referring to the library's, and
+// then every use in sensors.cpp fails as an incomplete type. The declaration has
+// to sit where the library declares it, so this header can name the type without
+// including the library — which matters because the host build compiles this
+// same header with no Adafruit libraries available at all.
+class Adafruit_ADXL345_Unified;
 
 namespace saas {
 
@@ -111,8 +130,7 @@ class Biquad {
 };
 
 /// Fixed-length boxcar average, templated on the tap count so each path can pick
-/// its own: 4 taps on the slow accel path (80 ms), 2 on the gyro fast path.
-/// `N` must be a power of two so the divide is a shift.
+/// the accel path (80 ms). `N` must be a power of two so the divide is a shift.
 template <uint8_t N>
 class MovingAverageN {
   static_assert(N >= 1 && (N & (N - 1)) == 0, "tap count must be a power of two");
@@ -146,10 +164,6 @@ class MovingAverageN {
 };
 
 using MovingAverage = MovingAverageN<kMaTaps>;
-/// The gyro fast path: 2 taps. The gyro DLPF is already 42 Hz, so this is only
-/// there to reject single-sample outliers, and more taps would smear a 40 ms
-/// rotation pulse that the orientation term depends on.
-using GyroAverage = MovingAverageN<kGyroMaTaps>;
 
 /// First-order IIR with a 1 s time constant, used to split the measured vector
 /// into gravity and linear acceleration. Seeded with the first sample so a unit
@@ -186,19 +200,18 @@ class GravityTracker {
 class Calibrator {
  public:
   void reset() { *this = Calibrator(); }
-  /// Gyro and SW-420 are part of the CALIB_LOG record (docs §6.8), so they are
-  /// captured alongside the accel. Storing accel only would emit
-  /// "gyr_x":0 for every sample, which looks like a working gyro that reads
-  /// exactly zero -- the worst possible failure for a calibration log.
-  void add(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxDps10 = 0, int32_t gyDps10 = 0,
-           int32_t gzDps10 = 0, bool sw420 = false);
+  /// The SW-420 level is captured alongside the acceleration because both are
+  /// part of the CALIB_LOG record (docs §6.8). A calibration log that carried
+  /// acceleration but not the vibration channel would not show the operator
+  /// whether the node was sitting still or being shaken while it baselined.
+  void add(int32_t axMg, int32_t ayMg, int32_t azMg, bool sw420 = false);
   uint16_t count() const { return n_; }
   bool valid() const { return n_ >= kCalibMinSamples; }
   /// Mean |a| in milli-g, and the mean gravity vector.
   int32_t meanMagMg() const;
-  int32_t meanGx() const { return gxSum_ / static_cast<int32_t>(n_ ? n_ : 1); }
-  int32_t meanGy() const { return gySum_ / static_cast<int32_t>(n_ ? n_ : 1); }
-  int32_t meanGz() const { return gzSum_ / static_cast<int32_t>(n_ ? n_ : 1); }
+  int32_t meanAxMg() const { return xSum_ / static_cast<int32_t>(n_ ? n_ : 1); }
+  int32_t meanAyMg() const { return ySum_ / static_cast<int32_t>(n_ ? n_ : 1); }
+  int32_t meanAzMg() const { return zSum_ / static_cast<int32_t>(n_ ? n_ : 1); }
   /// Sample standard deviation of |a|, milli-g. Reported by DIAG.
   uint32_t sigmaMg() const;
 
@@ -223,15 +236,12 @@ class Calibrator {
  private:
   int32_t meanQ8_ = 0;
   int64_t m2_ = 0;
-  int32_t gxSum_ = 0, gySum_ = 0, gzSum_ = 0;
+  int32_t xSum_ = 0, ySum_ = 0, zSum_ = 0;  ///< mean gravity vector, milli-g
   uint16_t n_ = 0;
   int32_t hist_[kCalibMaxSamples] = {0};  // raw |a| taps for the log
   int32_t histX_[kCalibMaxSamples] = {0};
   int32_t histY_[kCalibMaxSamples] = {0};
   int32_t histZ_[kCalibMaxSamples] = {0};
-  int32_t histGx_[kCalibMaxSamples] = {0};
-  int32_t histGy_[kCalibMaxSamples] = {0};
-  int32_t histGz_[kCalibMaxSamples] = {0};
   uint8_t histSw_[kCalibMaxSamples] = {0};
   uint8_t histN_ = 0;
   uint8_t histEvery_ = 1;  ///< set by SensorPipeline::beginCalibration
@@ -253,8 +263,9 @@ class SpeedEstimator {
   /// Derives the vehicle's forward axis from the measured gravity.
   ///
   /// Gravity alone gives "down" but not "forward" -- that would need a compass,
-  /// and this node has none. The mount is therefore specified as "the MPU's X
-  /// axis points forward" (see firmware/README.md), and all this does is remove
+  /// and this node has none. The mount is therefore specified as "the
+  /// accelerometer's X axis points forward" (see firmware/README.md), and all
+  /// this does is remove
   /// the tilt component so the integrator does not mistake gravity for
   /// acceleration. The result is the X axis projected onto the horizontal plane
   /// and renormalised, which is correct for any mount within about 45 degrees of
@@ -313,13 +324,12 @@ class Sw420 {
 
 /// Post-acquisition, pre-filter readings, in physical units. The acquisition task
 /// fills one of these per tick; the pipeline owns everything downstream. Keeping
-/// the boundary here means the SW-420 pin and the MPU burst read are the only
+/// the boundary here means the SW-420 pin and the ADXL345 read are the only
 /// hardware-aware code, and the whole signal chain below is host-testable.
 struct RawSample {
-  int32_t axMg, ayMg, azMg;      ///< raw MPU6050 accel, milli-g
-  int32_t gxDps10, gyDps10, gzDps10;  ///< raw MPU6050 gyro, 0.1 deg/s
-  bool sensorOk;                 ///< MPU present and the burst read succeeded
-  bool sw420Raw;                 ///< level at the SW-420 pin, unpolarised
+  int32_t axMg, ayMg, azMg;  ///< ADXL345 acceleration, milli-g
+  bool sensorOk;             ///< accelerometer present and the read succeeded
+  bool sw420Raw;             ///< level at the SW-420 pin, unpolarised
 };
 
 
@@ -334,8 +344,7 @@ class SensorPipeline {
   void attachInterrupts();
   /// Seeds the filters from a first reading, so the first second of telemetry is
   /// not a ramp from zero. Call immediately after `begin()`.
-  void prime(int32_t axMg, int32_t ayMg, int32_t azMg, int32_t gxDps10, int32_t gyDps10,
-             int32_t gzDps10);
+  void prime(int32_t axMg, int32_t ayMg, int32_t azMg);
 
   /// One tick. Returns false when the sample must be dropped (sensor fault), in
   /// which case `out` still gets a timestamp and the SW-420 level but carries
@@ -343,9 +352,13 @@ class SensorPipeline {
   /// "not listening" instead of scoring a fault as calm.
   bool step(uint32_t nowMs, const RawSample& in, Sample& out);
 
-  /// Raw counts -> physical units, using kMpuAccelRangeG / kMpuGyroRangeDps.
+  /// ADXL345 raw 16-bit register value -> milli-g.
+  ///
+  /// The data registers hold 13 significant bits left-justified in 16, so the
+  /// three padding bits come off with an arithmetic shift (which preserves the
+  /// sign), and the 3.9 mg/LSB FULL_RES scale is applied as an exact rational.
+  /// Integer only: nothing in the acquisition path is a float.
   static int32_t accelMg(int16_t raw);
-  static int32_t gyroDps10(int16_t raw);
 
   // --- calibration ------------------------------------------------------
   void beginCalibration(uint32_t nowMs, uint16_t durationMs);
@@ -382,7 +395,6 @@ class SensorPipeline {
   // the calibration baseline.
   MovingAverage maAx_, maAy_, maAz_;
   Biquad lpAx_, lpAy_, lpAz_;
-  GyroAverage maGx_, maGy_, maGz_;
   GravityTracker grav_;
   SpeedEstimator speed_;
   Sw420 sw_;
@@ -402,31 +414,75 @@ class SensorPipeline {
 };
 
 // ---------------------------------------------------------------------------
-// MPU6050 over I2C (ESP32 / Arduino only)
+// Motion sensor over I2C (ESP32 / Arduino only)
 // ---------------------------------------------------------------------------
 
-/// Minimal MPU6050 driver: no interrupts, no DMP, no FIFO. One 14-byte burst read
-/// per tick keeps the accel/gyro pairs in the same instant, which matters more
-/// than it sounds -- reading them in two transactions can mix samples 400 us
-/// apart and fabricate angular rate that does not exist.
-class Mpu6050 {
+/// The motion sensor this build uses: an **ADXL345 three-axis accelerometer**.
+///
+/// This class is the ONLY place in the firmware that knows which accelerometer
+/// is fitted. Everything above it — the filter chain, the free-fall and jerk
+/// detectors, the dead-reckoned speed integrator, the fused score — works in
+/// physical units (milli-g) and has no idea what produced them. Swapping the
+/// part again means changing this class and nothing else.
+///
+/// The ADXL345 is an accelerometer only. It has no gyroscope, and no rotation
+/// rate is available from it or inferred anywhere in this firmware. The
+/// the previous MPU6050 driver was replaced rather than adapted: it read six axes
+/// and configured two range registers, and neither has a counterpart here.
+///
+/// Built on `Adafruit_ADXL345_Unified`, which owns the I2C plumbing, validates
+/// DEVID at `begin()`, and keeps `FULL_RES` set (so the 3.9 mg/LSB scale holds
+/// on every range). This class adds what the part cannot do for itself:
+///
+///   * **milli-g conversion** in integer arithmetic, so no float reaches the
+///     signal chain;
+///   * **address fallback** to 0x1D when 0x53 does not answer;
+///   * **error accounting** for the DIAG report, which the library does not keep.
+class Adxl345 {
  public:
-  bool begin(uint8_t addr = kMpuAddr);
+  /// Releases the library instance when it is destroyed.
+  ///
+  /// The destructor is defined out of line in sensors.cpp, where the library
+  /// type is complete. Defining it here would call `delete` on an incomplete
+  /// type, which does not compile.
+  ~Adxl345();
+
+  // Default construction is required: the firmware has one of these as a file
+  // global, constructed before `begin()` runs. Declaring the copy operations at
+  // all suppresses the implicit default constructor, so it has to be asked for
+  // explicitly. `= default` is correct — every member has an initialiser, and
+  // there is nothing to do until `begin()`.
+  Adxl345() = default;
+  Adxl345(const Adxl345&) = delete;  // owns a heap pointer
+  Adxl345& operator=(const Adxl345&) = delete;
+  /// Probes [addr] and configures range + output rate. Returns false if the
+  /// part does not answer with the expected DEVID, which is what lets the
+  /// firmware report a missing sensor instead of reading noise forever.
+  bool begin(uint8_t addr = kAdxlAddr);
   bool present() const { return present_; }
   uint8_t address() const { return addr_; }
-  uint8_t whoAmI() const { return who_; }
-  /// Raw accel/gyro burst. Returns false on an I2C error.
-  bool read(int16_t& ax, int16_t& ay, int16_t& az, int16_t& gx, int16_t& gy, int16_t& gz);
-  void setRanges(int8_t accelG, int16_t gyroDps);
+  /// DEVID. The ADXL345 answers 0xE5; anything else means it is not there.
+  uint8_t deviceId() const { return devId_; }
+  /// One acceleration sample, already converted to milli-g.
+  /// Returns false on an I2C error so the caller can distinguish a fault from a
+  /// genuinely still vehicle.
+  bool read(int32_t& axMg, int32_t& ayMg, int32_t& azMg);
   uint32_t errorCount() const { return errors_; }
 
  private:
-  bool writeReg(uint8_t reg, uint8_t val);
-  bool readRegs(uint8_t reg, uint8_t* buf, size_t n);
-  uint8_t addr_ = kMpuAddr;
-  uint8_t who_ = 0;
+  /// Handle to the library driver, declared at global scope above.
+  ///
+  /// A pointer, and the class is not copyable, because this header must not
+  /// include the library. `sensors.cpp` includes it under `#if defined(ARDUINO)`.
+  Adafruit_ADXL345_Unified* dev_ = nullptr;
+  uint8_t addr_ = kAdxlAddr;
+  uint8_t devId_ = 0;
   bool present_ = false;
   uint32_t errors_ = 0;
+  /// Frozen-read detector state: the last three raw samples and how many
+  /// consecutive reads have returned exactly those.
+  int16_t lastX_ = INT16_MIN, lastY_ = INT16_MIN, lastZ_ = INT16_MIN;
+  uint8_t frozenRuns_ = 0;
 };
 
 /// Registers the ISR that latches SW-420 edges. The handler only stores a level
