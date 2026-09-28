@@ -8,9 +8,12 @@
 
 export const SOF0 = 0xa5;
 export const SOF1 = 0x5a;
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const MAX_PAYLOAD = 512;
-export const TELEMETRY_SIZE = 24;
+// v1 was 24 bytes and carried three gyro axes. The node now uses an ADXL345,
+// which has no gyroscope, so v2 drops those six bytes instead of zero-filling
+// them: a stream of exact zeros reads as a working gyro that never turns.
+export const TELEMETRY_SIZE = 18;
 
 /** Frame types. Direction is informational — the codec is symmetric. */
 export const Type = Object.freeze({
@@ -346,15 +349,12 @@ export const parseJsonFrame = (frame) =>
 /* --------------------------------------------------------------- telemetry */
 
 /**
- * Encode a telemetry sample into the 24-byte binary record.
+ * Encode a telemetry sample into the 18-byte binary record.
  * @param {object} s
  * @param {number} s.tMs        ms since boot
  * @param {number} s.ax         milli-g (may be fractional)
  * @param {number} s.ay
  * @param {number} s.az
- * @param {number} s.gx         0.1 deg/s
- * @param {number} s.gy
- * @param {number} s.gz
  * @param {number} s.magMg      accel magnitude, milli-g
  * @param {number} s.peakMg     session peak magnitude, milli-g
  * @param {number} s.flags      bitfield
@@ -371,9 +371,6 @@ export function encodeTelemetry(s) {
   view.setInt16(o, clampI16(s.ax), true); o += 2;
   view.setInt16(o, clampI16(s.ay), true); o += 2;
   view.setInt16(o, clampI16(s.az), true); o += 2;
-  view.setInt16(o, clampI16(s.gx), true); o += 2;
-  view.setInt16(o, clampI16(s.gy), true); o += 2;
-  view.setInt16(o, clampI16(s.gz), true); o += 2;
   view.setUint16(o, clampU16(s.magMg), true); o += 2;
   view.setUint16(o, clampU16(s.peakMg), true); o += 2;
   b[o++] = s.flags & 0xff;
@@ -393,9 +390,6 @@ export function decodeTelemetry(bytes) {
   const ax = view.getInt16(o, true); o += 2;
   const ay = view.getInt16(o, true); o += 2;
   const az = view.getInt16(o, true); o += 2;
-  const gx = view.getInt16(o, true); o += 2;
-  const gy = view.getInt16(o, true); o += 2;
-  const gz = view.getInt16(o, true); o += 2;
   const magMg = view.getUint16(o, true); o += 2;
   const peakMg = view.getUint16(o, true); o += 2;
   const flags = bytes[o++];
@@ -403,7 +397,7 @@ export function decodeTelemetry(bytes) {
   const batteryPct = bytes[o++];
   const state = bytes[o++];
   return {
-    tMs, ax, ay, az, gx, gy, gz, magMg, peakMg, flags, score, batteryPct, state,
+    tMs, ax, ay, az, magMg, peakMg, flags, score, batteryPct, state,
     stateName: StateName[state] ?? 'UNKNOWN',
     sw420: (flags & Flag.SW420) !== 0,
     buzzer: (flags & Flag.BUZZER) !== 0,

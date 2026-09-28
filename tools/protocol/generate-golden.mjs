@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   Type, State, Flag, encodeFrame, encodeTelemetry, crc16,
+  SOF0, SOF1, MAX_PAYLOAD, TELEMETRY_SIZE, PROTOCOL_VERSION,
 } from './codec.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -35,23 +36,23 @@ add('hello', 'HELLO — full capability negotiation',
   encodeFrame(Type.HELLO, {
     app: 'smart-accident-alert',
     appVersion: '1.0.0',
-    proto: 1,
+    proto: 2,
     capabilities: ['telemetry', 'config', 'calibrate', 'command', 'diag'],
     deviceName: 'My Car',
     locale: 'en-IN',
   }),
   { type: Type.HELLO, json: {
-    app: 'smart-accident-alert', appVersion: '1.0.0', proto: 1,
+    app: 'smart-accident-alert', appVersion: '1.0.0', proto: 2,
     capabilities: ['telemetry', 'config', 'calibrate', 'command', 'diag'],
     deviceName: 'My Car', locale: 'en-IN',
   } });
 
 add('helloAck', 'HELLO_ACK — device identity + capability flags',
   encodeFrame(Type.HELLO_ACK, {
-    fwVersion: '1.0.0', hw: 'esp32-devkit-v1', proto: 1,
+    fwVersion: '1.0.0', hw: 'esp32-devkit-v1', proto: 2,
     chipId: 'A1B2C3D4', mac: '24:6F:28:A1:B2:C3:D4', name: 'SAAS-A1B2C3D4',
     batteryMv: 4120, batteryPct: 96, charging: false, uptimeMs: 123456,
-    mpu: { present: true, addr: '0x68', whoAmI: 113 },
+    sensor: { part: 'ADXL345', present: true, addr: '0x53', deviceId: 229 },
     oled: { present: true, addr: '0x3C' },
     sw420: true, calibrated: true, sensorRateHz: 50, state: State.IDLE,
   }),
@@ -62,7 +63,7 @@ add('eventAccident', 'EVENT — fused accident detection',
     type: 'ACCIDENT_DETECTED', eventId: '8f3a1c22', seq: 7,
     t_ms: 423119, uptimeMs: 423119, score: 87,
     impact: {
-      magG: 4.82, peakAccMg: 4820, peakGyrDps: 391, gyrMagDps: 402.1,
+      magG: 4.82, peakAccMg: 4820,
       sw420: true, orientationChangeDeg: 63.4, preImpactSpeedKmh: 48.3,
     },
     confirmWindowSec: 10, canCancel: true,
@@ -71,7 +72,7 @@ add('eventAccident', 'EVENT — fused accident detection',
     type: 'ACCIDENT_DETECTED', eventId: '8f3a1c22', seq: 7,
     t_ms: 423119, uptimeMs: 423119, score: 87,
     impact: {
-      magG: 4.82, peakAccMg: 4820, peakGyrDps: 391, gyrMagDps: 402.1,
+      magG: 4.82, peakAccMg: 4820,
       sw420: true, orientationChangeDeg: 63.4, preImpactSpeedKmh: 48.3,
     },
     confirmWindowSec: 10, canCancel: true,
@@ -83,7 +84,7 @@ add('commandConfirm', 'COMMAND — confirm alert',
 
 add('config', 'CONFIG — full settings write',
   encodeFrame(Type.CONFIG, {
-    accelThresholdMg: 3000, gyroThresholdDps: 220, vibrationRequired: true,
+    accelThresholdMg: 3000, vibrationRequired: true,
     debounceMs: 60, confirmWindowSec: 10, minSpeedKmh: 5.0,
     detectorGain: 1.0, telemetryHz: 50, buzzerEnabled: true,
     ledEnabled: true, muteUntil: 0, autoArm: true,
@@ -94,13 +95,13 @@ add('config', 'CONFIG — full settings write',
 add('telemetryNominal', 'TELEMETRY — normal driving, 1g on Z',
   encodeFrame(Type.TELEMETRY, encodeTelemetry({
     tMs: 423119, ax: 120, ay: -45, az: 998,
-    gx: 23, gy: -11, gz: 7, magMg: 1004, peakMg: 4820,
+    magMg: 1004, peakMg: 4820,
     flags: Flag.SW420 | Flag.LED_GREEN | Flag.OLED_OK | Flag.ARMED,
     score: 0, batteryPct: 96, state: State.IDLE,
   })),
   { type: Type.TELEMETRY, telemetry: {
     tMs: 423119, ax: 120, ay: -45, az: 998,
-    gx: 23, gy: -11, gz: 7, magMg: 1004, peakMg: 4820,
+    magMg: 1004, peakMg: 4820,
     flags: Flag.SW420 | Flag.LED_GREEN | Flag.OLED_OK | Flag.ARMED,
     score: 0, batteryPct: 96, state: State.IDLE,
   } });
@@ -109,14 +110,14 @@ add('telemetryNominal', 'TELEMETRY — normal driving, 1g on Z',
 add('telemetryImpact', 'TELEMETRY — impact, every flag except LED_GREEN, ALARM state',
   encodeFrame(Type.TELEMETRY, encodeTelemetry({
     tMs: 429000, ax: 4820, ay: -3120, az: 1100,
-    gx: -390, gy: 220, gz: 145, magMg: 5948, peakMg: 5948,
+    magMg: 5948, peakMg: 5948,
     flags: Flag.SW420 | Flag.BUZZER | Flag.LED_RED | Flag.OLED_OK |
            Flag.SOS_BUTTON | Flag.ARMED | Flag.CHARGING,
     score: 87, batteryPct: 41, state: State.ALARM,
   })),
   { type: Type.TELEMETRY, telemetry: {
     tMs: 429000, ax: 4820, ay: -3120, az: 1100,
-    gx: -390, gy: 220, gz: 145, magMg: 5948, peakMg: 5948,
+    magMg: 5948, peakMg: 5948,
     // 0xF7: all eight bits except LED_GREEN (0x08). Written as the same
     // expression that produced the frame so the two can never drift apart.
     flags: Flag.SW420 | Flag.BUZZER | Flag.LED_RED | Flag.OLED_OK |
@@ -128,12 +129,12 @@ add('telemetryImpact', 'TELEMETRY — impact, every flag except LED_GREEN, ALARM
 add('telemetrySaturated', 'TELEMETRY — i16/u16 saturation + unknown battery',
   encodeFrame(Type.TELEMETRY, encodeTelemetry({
     tMs: 4294967295, ax: 99999, ay: -99999, az: 32767,
-    gx: -32768, gy: 32767, gz: 0, magMg: 65535, peakMg: 70000,
+    magMg: 65535, peakMg: 70000,
     flags: 0, score: 255, batteryPct: 255, state: State.FAULT,
   })),
   { type: Type.TELEMETRY, telemetry: {
     tMs: 4294967295, ax: 32767, ay: -32768, az: 32767,
-    gx: -32768, gy: 32767, gz: 0, magMg: 65535, peakMg: 65535,
+    magMg: 65535, peakMg: 65535,
     // Expectations are the CLAMPED values, written as the same expressions the
     // encoder clamps to, so the manifest can never disagree with the wire.
     flags: 0, score: 255, batteryPct: 255, state: State.FAULT,
@@ -141,12 +142,12 @@ add('telemetrySaturated', 'TELEMETRY — i16/u16 saturation + unknown battery',
 
 add('telemetryMuted', 'TELEMETRY — MUTED, disarmed, zero motion',
   encodeFrame(Type.TELEMETRY, encodeTelemetry({
-    tMs: 1000, ax: 0, ay: 0, az: 1000, gx: 0, gy: 0, gz: 0,
+    tMs: 1000, ax: 0, ay: 0, az: 1000,
     magMg: 1000, peakMg: 0, flags: 0, score: 0,
     batteryPct: 0, state: State.MUTED,
   })),
   { type: Type.TELEMETRY, telemetry: {
-    tMs: 1000, ax: 0, ay: 0, az: 1000, gx: 0, gy: 0, gz: 0,
+    tMs: 1000, ax: 0, ay: 0, az: 1000,
     magMg: 1000, peakMg: 0, flags: 0, score: 0,
     batteryPct: 0, state: State.MUTED,
   } });
@@ -172,10 +173,13 @@ const crcVectors = [
 
 const doc = {
   $comment: 'Generated by tools/protocol/generate-golden.mjs. Do not hand-edit.',
-  protocolVersion: 1,
+  // Taken from the codec rather than typed in: these used to be literals, which
+  // is how a version bump could leave the manifest quietly describing the old
+  // wire format while the codec emitted the new one.
+  protocolVersion: PROTOCOL_VERSION,
   generatedFrom: 'tools/protocol/codec.js',
   constants: {
-    SOF0: 0xa5, SOF1: 0x5a, MAX_PAYLOAD: 512, TELEMETRY_SIZE: 24,
+    SOF0, SOF1, MAX_PAYLOAD, TELEMETRY_SIZE,
     Type, State, Flag,
   },
   crc16: { algorithm: 'CRC-16/CCITT-FALSE poly=0x1021 init=0xFFFF', vectors: crcVectors },
