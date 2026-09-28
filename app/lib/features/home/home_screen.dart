@@ -220,10 +220,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               const SizedBox(width: Spacing.sm),
               Expanded(
                 child: MetricTile(
-                  label: 'Rotation',
-                  value: home.gyrationDps.toStringAsFixed(0),
-                  unit: '°/s',
-                  icon: Icons.rotate_right,
+                  label: 'Vertical',
+                  value: home.verticalG.toStringAsFixed(2),
+                  unit: 'g',
+                  icon: Icons.swap_vert,
                 ),
               ),
               const SizedBox(width: Spacing.sm),

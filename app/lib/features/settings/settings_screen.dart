@@ -53,29 +53,19 @@ class SettingsScreen extends ConsumerWidget {
                         help: 'How hard a jolt must be before the detector considers '
                             'a crash. Raise it if you get false alarms on rough roads.',
                         value: state.config.accelThresholdMg.toDouble(),
+                        // 16000 mg = 16 g is the ADXL345's configured full
+                        // scale. The old 8000 ceiling was full scale of the
+                        // MPU6050's ±8 g range, so a threshold above it was a
+                        // number the node could never act on.
                         min: 1500,
-                        max: 8000,
-                        divisions: 65,
+                        max: 16000,
+                        divisions: 145,
                         unit: 'mg',
                         display: '${state.config.accelThresholdMg} mg '
                             '(${(state.config.accelThresholdMg / 1000).toStringAsFixed(1)} g)',
                         onChanged: (double v) => ref
                             .read(settingsViewProvider.notifier)
                             .setAccelThreshold(v.round()),
-                      ),
-                      const Divider(height: Spacing.large),
-                      _slider(
-                        context,
-                        label: 'Rotation threshold',
-                        help: 'How much spin counts as a rollover.',
-                        value: state.config.gyroThresholdDps,
-                        min: 80,
-                        max: 800,
-                        divisions: 36,
-                        display: '${state.config.gyroThresholdDps.round()} °/s',
-                        onChanged: (double v) => ref
-                            .read(settingsViewProvider.notifier)
-                            .setGyroThreshold(v),
                       ),
                       const Divider(height: Spacing.large),
                       _slider(
@@ -313,9 +303,9 @@ class SettingsScreen extends ConsumerWidget {
                 severity: StatusSeverity.neutral,
                 dense: true,
               ),
-              if ((d.mpuI2cErrors ?? 0) > 0)
+              if ((d.sensorI2cErrors ?? 0) > 0)
                 StatusPill(
-                  label: 'I²C errors ${d.mpuI2cErrors}',
+                  label: 'I²C errors ${d.sensorI2cErrors}',
                   severity: StatusSeverity.critical,
                   icon: Icons.error_outline,
                   dense: true,

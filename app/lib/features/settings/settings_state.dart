@@ -147,7 +147,11 @@ class SettingsViewController extends Notifier<SettingsViewState> {
   void setAccelThreshold(int millig) =>
       _queue(ConfigPatch(accelThresholdMg: millig));
 
-  void setGyroThreshold(double dps) => _queue(ConfigPatch(gyroThresholdDps: dps));
+  /// There is deliberately no rotation-threshold setter.
+  ///
+  /// The node's ADXL345 has no gyroscope, so there is no rotation rate to
+  /// threshold. A slider that always read back the default would be worse than
+  /// none: the user would set it and believe it had changed the detector.
 
   void setConfirmWindow(int seconds) =>
       _queue(ConfigPatch(confirmWindowSec: seconds));

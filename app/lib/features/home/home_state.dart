@@ -23,7 +23,6 @@
 library;
 
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart' show BuildContext, IconData, Icons, VoidCallback;
 import 'package:go_router/go_router.dart';
@@ -181,15 +180,15 @@ class HomeState {
   String get networkValue => online ? 'Online' : 'Offline';
   StatusSeverity get networkSeverity => online ? StatusSeverity.good : StatusSeverity.warning;
 
-  /// Combined gyroscope magnitude in °/s, for the dashboard's rotation tile.
-  double get gyrationDps {
-    final TelemetryRecord? t = telemetry;
-    if (t == null) return 0;
-    final double x = t.gyrXDps;
-    final double y = t.gyrYDps;
-    final double z = t.gyrZDps;
-    return math.sqrt(x * x + y * y + z * z);
-  }
+  /// Vertical load in g, for the dashboard's tilt tile.
+  ///
+  /// This replaced a "rotation in °/s" tile. The node has an ADXL345, which
+  /// measures acceleration and not rotation, so there is no rotation rate to
+  /// show — and a tile frozen at 0.0 °/s would look like a working sensor that
+  /// never turns. The Z axis is the useful replacement: it is where gravity and
+  /// crash load along the vertical show up, and it is what the firmware's
+  /// free-fall and tilt terms are actually computed from.
+  double get verticalG => (telemetry?.accZ ?? 0) / 1000.0;
 
   StatusSeverity get stateSeverity => switch (telemetry?.state) {
         DeviceState.alarm || DeviceState.sos => StatusSeverity.critical,
@@ -284,7 +283,7 @@ class TelemetrySampler {
     // rebuild.
     final String key =
         '${(sample.magMg / 1000).toStringAsFixed(2)}|'
-        '${_gyrationDps(sample).toStringAsFixed(0)}|'
+        '${(sample.accZ / 1000).toStringAsFixed(2)}|'
         '${(sample.peakMg / 1000).toStringAsFixed(1)}|'
         '${sample.flags.sw420}|${sample.state.byte}|'
         '${sample.batteryPctOrNull}';
@@ -296,18 +295,6 @@ class TelemetrySampler {
   }
 
   void dispose() => _timer.cancel();
-}
-
-/// Combined gyroscope magnitude in degrees per second.
-///
-/// `TelemetryRecord` exposes the axes but not the magnitude, and the dashboard
-/// shows one "rotation" figure — so it is computed here rather than adding a
-/// getter to the entity for one caller.
-double _gyrationDps(TelemetryRecord sample) {
-  final double x = sample.gyrXDps;
-  final double y = sample.gyrYDps;
-  final double z = sample.gyrZDps;
-  return math.sqrt(x * x + y * y + z * z);
 }
 
 /// The dashboard's controller.
