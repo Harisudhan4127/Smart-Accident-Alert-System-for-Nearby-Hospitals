@@ -232,16 +232,13 @@ void main() {
           expectField('tMs', record.tMs);
           expectField('ax', record.accX);
           expectField('az', record.accZ);
-          expectField('gx', record.gyrX);
-          expectField('gy', record.gyrY);
-          expectField('gz', record.gyrZ);
           expectField('magMg', record.magMg);
           expectField('peakMg', record.peakMg);
           expectField('score', record.impactScore);
           expectField('batteryPct', record.batteryPct);
           expectField('state', record.state.byte);
 
-          // Round-trip: the encoder must reproduce the exact 24 bytes.
+          // Round-trip: the encoder must reproduce the exact 18 bytes.
           expect(
             TelemetryCodec.encode(record).toList(),
             record.toBytes().toList(),
@@ -305,7 +302,6 @@ void main() {
       expect(record.accY, -32768);
       expect(record.accY, telemetry['ay']);
       expect(record.accX, 32767);
-      expect(record.gyrX, -32768);
       expect(record.magMg, 65535);
       expect(record.batteryPct, kBatteryUnknown);
       expect(record.hasBattery, isFalse);

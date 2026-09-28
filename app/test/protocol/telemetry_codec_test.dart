@@ -96,9 +96,6 @@ void main() {
           ax: vector.ax,
           ay: vector.ay,
           az: vector.az,
-          gx: vector.gx,
-          gy: vector.gy,
-          gz: vector.gz,
           magMg: vector.magMg,
           peakMg: vector.peakMg,
           flags: vector.flags,
@@ -124,9 +121,6 @@ void main() {
           ax: vector.ax,
           ay: vector.ay,
           az: vector.az,
-          gx: vector.gx,
-          gy: vector.gy,
-          gz: vector.gz,
           magMg: vector.magMg,
           peakMg: vector.peakMg,
           flags: vector.flags,
@@ -149,9 +143,6 @@ void main() {
           ax: vector.ax,
           ay: vector.ay,
           az: vector.az,
-          gx: vector.gx,
-          gy: vector.gy,
-          gz: vector.gz,
           magMg: vector.magMg,
           peakMg: vector.peakMg,
           flags: vector.flags,
@@ -164,9 +155,6 @@ void main() {
         expect(record.accX, vector.expectAx, reason: 'ax');
         expect(record.accY, vector.expectAy, reason: 'ay');
         expect(record.accZ, vector.expectAz, reason: 'az');
-        expect(record.gyrX, vector.expectGx, reason: 'gx');
-        expect(record.gyrY, vector.expectGy, reason: 'gy');
-        expect(record.gyrZ, vector.expectGz, reason: 'gz');
         expect(record.magMg, vector.expectMagMg, reason: 'magMg');
         expect(record.peakMg, vector.expectPeakMg, reason: 'peakMg');
         expect(record.flags.toByte(), vector.expectFlags, reason: 'flags');
@@ -178,7 +166,7 @@ void main() {
         );
         expect(record.state.byte, vector.expectState, reason: 'state');
 
-        // And re-encoding the decoded record reproduces the same 24 bytes.
+        // And re-encoding the decoded record reproduces the same 18 bytes.
         expect(_toHex(TelemetryCodec.encode(record)), vector.payloadHex);
       });
     }
@@ -191,9 +179,6 @@ void main() {
         accX: -1500,
         accY: 250,
         accZ: 998,
-        gyrX: 23,
-        gyrY: -11,
-        gyrZ: 7,
         magMg: 1004,
         peakMg: 4820,
         flags: TelemetryFlags(
@@ -211,7 +196,7 @@ void main() {
         state: DeviceState.alarm,
       );
       final Uint8List bytes = record.toBytes();
-      expect(bytes, hasLength(24));
+      expect(bytes, hasLength(18));
       expect(TelemetryCodec.tryDecode(bytes), record);
     });
 
@@ -248,9 +233,6 @@ void main() {
           accX: value,
           accY: 0,
           accZ: 0,
-          gyrX: 0,
-          gyrY: 0,
-          gyrZ: 0,
           magMg: 0,
           peakMg: 0,
           flags: TelemetryFlags.none,
@@ -277,7 +259,7 @@ void main() {
       final Failure? failure = result.failureOrNull;
       expect(failure, isNotNull);
       expect(failure!.kind, FailureKind.validation);
-      expect(failure.message, contains('24 bytes'));
+      expect(failure.message, contains('18 bytes'));
       expect(
         failure.retryable,
         isFalse,
@@ -293,9 +275,6 @@ void main() {
         accX: 1500,
         accY: -250,
         accZ: 1000,
-        gyrX: 235,
-        gyrY: -110,
-        gyrZ: 70,
         magMg: 4820,
         peakMg: 4820,
         flags: TelemetryFlags.none,
@@ -306,9 +285,6 @@ void main() {
       expect(record.accXG, 1.5);
       expect(record.accYG, -0.25);
       expect(record.accZG, 1.0);
-      expect(record.gyrXDps, 23.5);
-      expect(record.gyrYDps, -11.0);
-      expect(record.gyrZDps, 7.0);
       expect(record.magG, 4.82);
       expect(record.peakG, 4.82);
     });
@@ -319,9 +295,6 @@ void main() {
         accX: 0,
         accY: 0,
         accZ: 0,
-        gyrX: 0,
-        gyrY: 0,
-        gyrZ: 0,
         magMg: 0,
         peakMg: 0,
         flags: TelemetryFlags.none,
@@ -380,8 +353,8 @@ void main() {
       final TelemetryRecord record = _mustHave(maybe);
       final Map<String, Object?> json = telemetryToReferenceJson(record);
       expect(json['tMs'], 0);
-      expect(json['ax'], 1);
-      expect(json['gy'], -1);
+      expect(json['ax'], 0);
+      expect(json['ay'], -1);
       expect(json['state'], 0);
       expect(json['stateName'], 'BOOT');
       expect(json['flags'], 0x00);

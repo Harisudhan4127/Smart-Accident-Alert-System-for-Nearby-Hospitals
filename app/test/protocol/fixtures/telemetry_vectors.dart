@@ -33,9 +33,6 @@ class TelemetryVector {
     required this.ax,
     required this.ay,
     required this.az,
-    required this.gx,
-    required this.gy,
-    required this.gz,
     required this.magMg,
     required this.peakMg,
     required this.flags,
@@ -48,9 +45,6 @@ class TelemetryVector {
     required this.expectAx,
     required this.expectAy,
     required this.expectAz,
-    required this.expectGx,
-    required this.expectGy,
-    required this.expectGz,
     required this.expectMagMg,
     required this.expectPeakMg,
     required this.expectFlags,
@@ -71,9 +65,6 @@ class TelemetryVector {
   final double ax;
   final double ay;
   final double az;
-  final double gx;
-  final double gy;
-  final double gz;
   final double magMg;
   final double peakMg;
   final int flags;
@@ -81,7 +72,7 @@ class TelemetryVector {
   final double batteryPct;
   final int state;
 
-  /// Expected 24-byte payload, uppercase hex.
+  /// Expected 18-byte payload, uppercase hex.
   final String payloadHex;
 
   /// Expected full `TELEMETRY` frame (§3 + §5), uppercase hex.
@@ -92,9 +83,6 @@ class TelemetryVector {
   final int expectAx;
   final int expectAy;
   final int expectAz;
-  final int expectGx;
-  final int expectGy;
-  final int expectGz;
   final int expectMagMg;
   final int expectPeakMg;
   final int expectFlags;
@@ -111,29 +99,25 @@ const List<TelemetryVector> kExtraTelemetryVectors = <TelemetryVector>[
         'zero. They agree on positive halves and disagree on every negative '
         'half: 0.5/1.5/2.5 encode the same, -0.5/-1.5/-2.5 do not.',
     tMs: 0,
-    ax: 0.5,
-    ay: 1.5,
-    az: 2.5,
-    gx: -0.5,
-    gy: -1.5,
-    gz: -2.5,
+    // The negative halves used to be carried on the gyroscope axes. With an
+    // ADXL345 there are no gyro axes, so they moved onto the accel axes:
+    // JS Math.round(-0.5) is -0, and half-away-from-zero would be -1, which is
+    // the whole point of this vector.
+    ax: -0.5,
+    ay: -1.5,
+    az: -2.5,
     magMg: 0,
     peakMg: 0,
     flags: 0x00,
     score: 0,
     batteryPct: 0,
     state: 0,
-    // ax=1, ay=2, az=3, gx=-0, gy=-1, gz=-2
-    payloadHex: '000000000100020003000000FFFFFEFF0000000000000000',
-    frameHex:
-        'A55A01101800000000000100020003000000FFFFFEFF000000000000000085BD',
+    payloadHex: '000000000000FFFFFEFF0000000000000000',
+    frameHex: 'A55A02101200000000000000FFFFFEFF000000000000000079C0',
     expectTMs: 0,
-    expectAx: 1,
-    expectAy: 2,
-    expectAz: 3,
-    expectGx: 0,
-    expectGy: -1,
-    expectGz: -2,
+    expectAx: 0,
+    expectAy: -1,
+    expectAz: -2,
     expectMagMg: 0,
     expectPeakMg: 0,
     expectFlags: 0x00,
@@ -149,25 +133,18 @@ const List<TelemetryVector> kExtraTelemetryVectors = <TelemetryVector>[
     ax: 0,
     ay: 0,
     az: 0,
-    gx: 1000,
-    gy: -1000,
-    gz: 0,
     magMg: 1000,
     peakMg: 0,
     flags: 0x00,
     score: 0,
     batteryPct: 100,
     state: 1,
-    payloadHex: 'FFFFFFFF000000000000E80318FC0000E803000000006401',
-    frameHex:
-        'A55A01101800FFFFFFFF000000000000E80318FC0000E803000000006401E4A3',
+    payloadHex: 'FFFFFFFF000000000000E803000000006401',
+    frameHex: 'A55A02101200FFFFFFFF000000000000E803000000006401F384',
     expectTMs: 0xFFFFFFFF,
     expectAx: 0,
     expectAy: 0,
     expectAz: 0,
-    expectGx: 1000,
-    expectGy: -1000,
-    expectGz: 0,
     expectMagMg: 1000,
     expectPeakMg: 0,
     expectFlags: 0x00,
@@ -183,25 +160,18 @@ const List<TelemetryVector> kExtraTelemetryVectors = <TelemetryVector>[
     ax: 0,
     ay: 0,
     az: 0,
-    gx: 1000,
-    gy: 0,
-    gz: 0,
     magMg: 0,
     peakMg: 0,
     flags: 0x00,
     score: 0,
     batteryPct: 0,
     state: 0,
-    payloadHex: '00000000000000000000E803000000000000000000000000',
-    frameHex:
-        'A55A0110180000000000000000000000E8030000000000000000000000007D5F',
+    payloadHex: '000000000000000000000000000000000000',
+    frameHex: 'A55A02101200000000000000000000000000000000000000FCCA',
     expectTMs: 0,
     expectAx: 0,
     expectAy: 0,
     expectAz: 0,
-    expectGx: 1000,
-    expectGy: 0,
-    expectGz: 0,
     expectMagMg: 0,
     expectPeakMg: 0,
     expectFlags: 0x00,
@@ -218,25 +188,18 @@ const List<TelemetryVector> kExtraTelemetryVectors = <TelemetryVector>[
     ax: 40000,
     ay: -40000,
     az: 32000.5,
-    gx: 40000,
-    gy: -40000,
-    gz: 32767.5,
     magMg: 70000,
     peakMg: -5,
     flags: 0xFF,
     score: 300,
     batteryPct: -1,
     state: 6,
-    payloadHex: '01000000FF7F0080017DFF7F0080FF7FFFFF0000FFFF0006',
-    frameHex:
-        'A55A0110180001000000FF7F0080017DFF7F0080FF7FFFFF0000FFFF0006AC64',
+    payloadHex: '01000000FF7F0080017DFFFF0000FFFF0006',
+    frameHex: 'A55A0210120001000000FF7F0080017DFFFF0000FFFF000638E0',
     expectTMs: 1,
     expectAx: 32767,
     expectAy: -32768,
     expectAz: 32001,
-    expectGx: 32767,
-    expectGy: -32768,
-    expectGz: 32767,
     expectMagMg: 65535,
     expectPeakMg: 0,
     expectFlags: 0xFF,
@@ -253,25 +216,18 @@ const List<TelemetryVector> kExtraTelemetryVectors = <TelemetryVector>[
     ax: -32768,
     ay: 32767,
     az: -32768,
-    gx: 32767,
-    gy: 0,
-    gz: 0,
     magMg: 65535,
     peakMg: 65535,
     flags: 0xFF,
     score: 255,
     batteryPct: 255,
     state: 255,
-    payloadHex: '000000800080FF7F0080FF7F00000000FFFFFFFFFFFFFFFF',
-    frameHex:
-        'A55A01101800000000800080FF7F0080FF7F00000000FFFFFFFFFFFFFFFF0265',
+    payloadHex: '000000800080FF7F0080FFFFFFFFFFFFFFFF',
+    frameHex: 'A55A02101200000000800080FF7F0080FFFFFFFFFFFFFFFF4E3F',
     expectTMs: 0x80000000,
     expectAx: -32768,
     expectAy: 32767,
     expectAz: -32768,
-    expectGx: 32767,
-    expectGy: 0,
-    expectGz: 0,
     expectMagMg: 65535,
     expectPeakMg: 65535,
     expectFlags: 0xFF,
@@ -284,8 +240,8 @@ const List<TelemetryVector> kExtraTelemetryVectors = <TelemetryVector>[
 ];
 
 /// A payload whose length is deliberately wrong, for the length-rejection tests.
-const String kShortTelemetryPayloadHex = 'A55A01101000';
+const String kShortTelemetryPayloadHex = 'A55A02101000';
 
 /// A frame with a deliberately bad CRC (last byte flipped), for the
 /// CRC-rejection tests.
-const String kCorruptCrcFrameHex = 'A55A01020000149D';
+const String kCorruptCrcFrameHex = 'A55A02020000C806';

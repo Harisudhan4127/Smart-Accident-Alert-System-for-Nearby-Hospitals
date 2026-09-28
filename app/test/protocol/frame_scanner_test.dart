@@ -23,11 +23,11 @@ Uint8List _hex(String s) {
 }
 
 void main() {
-  // A5 5A 01 02 0000 149C — TYPE 0x02 (PING), LEN 0, from golden.json "empty".
-  const String pingFrameHex = 'A55A01020000149C';
-  // A5 5A 01 10 18 00 <24 B payload> 85BD — TYPE 0x10 (TELEMETRY).
+  // A5 5A 02 02 0000 C807 — TYPE 0x02 (PING), LEN 0, from golden.json "empty".
+  const String pingFrameHex = 'A55A02020000C807';
+  // A5 5A 02 10 12 00 <18 B payload> 79C0 — TYPE 0x10 (TELEMETRY).
   const String telemetryFrameHex =
-      'A55A01101800000000000100020003000000FFFFFEFF000000000000000085BD';
+      'A55A02101200000000000000FFFFFEFF000000000000000079C0';
 
   group('single frame', () {
     test('delivers a complete frame and its exact payload', () {
@@ -39,7 +39,7 @@ void main() {
       expect(frames.single.typeCode, 0x02);
       expect(frames.single.version, kProtocolVersion);
       expect(frames.single.payload, isEmpty);
-      expect(frames.single.crc, 0x9C14);
+      expect(frames.single.crc, 0x07C8); // LE, the v2 frame's CRC
       expect(frames.single.frameLength, 8);
       expect(scanner.stats.frames, 1);
       expect(scanner.stats.discardedBytes, 0);
@@ -47,25 +47,25 @@ void main() {
     });
 
     test(
-        'decodes a 24-byte binary payload without copying it out of the '
+        'decodes an 18-byte binary payload without copying it out of the '
         'buffer', () {
       final FrameScanner scanner = FrameScanner();
       final List<int> seen = <int>[];
       scanner.scan(_hex(telemetryFrameHex), (BleFrameView view) {
         expect(view.type, MessageType.telemetry);
-        expect(view.payloadLength, 24);
+        expect(view.payloadLength, 18);
         // The view is a window into the scanner's own buffer: identical storage
         // would be an implementation detail, but `payloadStart == kHeaderBytes`
         // is the contract that makes the offset arithmetic auditable.
         expect(view.payloadStart, kHeaderBytes);
         expect(
           view.payload,
-          _hex('000000000100020003000000FFFFFEFF0000000000000000'),
+          _hex('000000000000FFFFFEFF0000000000000000'),
         );
         seen.add(view.payloadLength);
         return true;
       });
-      expect(seen, <int>[24]);
+      expect(seen, <int>[18]);
     });
 
     test('the payload offset is the payload, not the CRC', () {
@@ -101,7 +101,7 @@ void main() {
           hasLength(1),
           reason: 'split at $cut produced ${frames.length} frames',
         );
-        expect(frames.single.payload, hasLength(24), reason: 'split at $cut');
+        expect(frames.single.payload, hasLength(18), reason: 'split at $cut');
       }
     });
 
@@ -124,7 +124,7 @@ void main() {
       final FrameScanner scanner = FrameScanner();
       // A5 5A 01 10 18 00 — the whole header and nothing else.
       final int delivered =
-          scanner.scan(_hex('A55A01101800'), (BleFrameView _) => true);
+          scanner.scan(_hex('A55A02101200'), (BleFrameView _) => true);
       expect(delivered, 0);
       expect(scanner.hasPartialFrame, isTrue);
       expect(scanner.bufferedBytes, 6);
@@ -138,7 +138,7 @@ void main() {
 
     test('reports a cut frame as truncatedTail', () {
       final FrameScanner scanner = FrameScanner();
-      scanner.scan(_hex('A55A0110180000'), (BleFrameView _) => true);
+      scanner.scan(_hex('A55A0210120000'), (BleFrameView _) => true);
       expect(scanner.stats.truncatedTail, 7);
     });
   });
@@ -194,7 +194,7 @@ void main() {
 
     test('a frame is found after a rejected one in the same chunk', () {
       final FrameScanner scanner = FrameScanner();
-      const String corrupt = 'A55A01020000149D'; // last byte flipped
+      const String corrupt = 'A55A02020000C806'; // last byte flipped
       final List<BleFrame> frames =
           scanner.scanToList(_hex('$corrupt$pingFrameHex'));
       expect(frames, hasLength(1), reason: 'only the good frame is delivered');
@@ -207,7 +207,7 @@ void main() {
     test('a bad CRC is counted, not delivered', () {
       final FrameScanner scanner = FrameScanner();
       final List<BleFrame> frames =
-          scanner.scanToList(_hex('A55A01020000149D'));
+          scanner.scanToList(_hex('A55A02020000C806'));
       expect(frames, isEmpty);
       expect(scanner.stats.crcErrors, 1);
       expect(scanner.stats.integrityRatio, 0.0);
@@ -215,8 +215,10 @@ void main() {
 
     test('a wrong VER is rejected and counted separately', () {
       final FrameScanner scanner = FrameScanner();
-      // A5 5A 02 02 0000 <crc over 02 02 00 00>
-      final Uint8List frame = _hex('A55A02020000C807');
+      // A5 5A 01 02 0000 <crc> — a well-formed v1 frame. The scanner must
+      // refuse it on VER alone, which is what stops a v1 app from silently
+      // misparsing an 18-byte v2 record.
+      final Uint8List frame = _hex('A55A01020000149C');
       final List<BleFrame> frames = scanner.scanToList(frame);
       expect(frames, isEmpty);
       expect(scanner.stats.versionRejects, 1);
@@ -233,7 +235,7 @@ void main() {
       // never cause a large allocation. We assert both the rejection and that
       // the scanner did not sit waiting for 65535 bytes.
       final List<BleFrame> frames =
-          scanner.scanToList(_hex('A55A0102FFFF0000'));
+          scanner.scanToList(_hex('A55A0202FFFF0000'));
       expect(frames, isEmpty);
       expect(scanner.stats.lengthRejects, 1);
       expect(scanner.hasPartialFrame, isFalse);
@@ -320,7 +322,7 @@ void main() {
     test('reset drops a partial frame so a reconnect does not look corrupt',
         () {
       final FrameScanner scanner = FrameScanner();
-      scanner.scan(_hex('A55A01101800'), (BleFrameView _) => true);
+      scanner.scan(_hex('A55A02101200'), (BleFrameView _) => true);
       expect(scanner.hasPartialFrame, isTrue);
       scanner.reset();
       expect(scanner.hasPartialFrame, isFalse);
@@ -335,7 +337,7 @@ void main() {
         typeCode: MessageType.hello.code,
         payload: Uint8List.fromList(<int>[0x7B, 0x7D]),
       );
-      expect(frame.sublist(0, 6), <int>[0xA5, 0x5A, 0x01, 0x01, 0x02, 0x00]);
+      expect(frame.sublist(0, 6), <int>[0xA5, 0x5A, 0x02, 0x01, 0x02, 0x00]);
       final FrameScanner scanner = FrameScanner();
       expect(scanner.scanToList(frame).single.payload, <int>[0x7B, 0x7D]);
     });

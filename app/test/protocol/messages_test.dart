@@ -83,9 +83,6 @@ const CalibrationSample _sample = CalibrationSample(
   accX: 12,
   accY: -34,
   accZ: 1002,
-  gyrX: 3,
-  gyrY: -1,
-  gyrZ: 5,
   sw420: false,
 );
 
@@ -251,7 +248,6 @@ void main() {
     test('out-of-range values are clamped, matching the device', () {
       final DeviceConfig config = DeviceConfig(
         accelThresholdMg: 999999,
-        gyroThresholdDps: 5000,
         vibrationRequired: true,
         debounceMs: 0,
         confirmWindowSec: 9999,
@@ -263,8 +259,7 @@ void main() {
         muteUntil: -5,
         autoArm: true,
       );
-      expect(config.accelThresholdMg, 8000, reason: '§6.4 upper bound');
-      expect(config.gyroThresholdDps, 800);
+      expect(config.accelThresholdMg, 16000, reason: '§6.4 upper bound');
       expect(config.debounceMs, 20, reason: '§6.4 lower bound');
       expect(config.confirmWindowSec, 120);
       expect(config.minSpeedKmh, 0);
@@ -276,7 +271,6 @@ void main() {
     test('the §6.4 defaults are exactly the documented ones', () {
       final DeviceConfig d = DeviceConfig.defaults();
       expect(d.accelThresholdMg, 3000);
-      expect(d.gyroThresholdDps, 220);
       expect(d.vibrationRequired, isTrue);
       expect(d.debounceMs, 60);
       expect(d.confirmWindowSec, 10);
@@ -290,8 +284,11 @@ void main() {
     });
 
     test('clampedFields explains what the device will do differently', () {
+      // 20000 mg is past the 16000 ceiling (16 g, the ADXL345's full scale), so
+      // this still exercises the clamp. 12000 no longer does: that was only
+      // unreachable when the bound was the old part's 8000.
       const ConfigPatch requested = ConfigPatch(
-        accelThresholdMg: 12000,
+        accelThresholdMg: 20000,
         telemetryHz: 50,
       );
       final DeviceConfig applied = DeviceConfig.fromPatch(requested);
@@ -299,7 +296,6 @@ void main() {
         DeviceConfig.clampedFields(
           requested,
           accelThresholdMg: applied.accelThresholdMg,
-          gyroThresholdDps: applied.gyroThresholdDps,
           debounceMs: applied.debounceMs,
           confirmWindowSec: applied.confirmWindowSec,
           minSpeedKmh: applied.minSpeedKmh,
@@ -409,7 +405,7 @@ void main() {
       {
         "state": 2, "stateName": "PENDING", "sinceMs": 8123,
         "effectiveConfig": { "accelThresholdMg": 3000, "telemetryHz": 50 },
-        "peakMagMg": 4820, "peakGyrDps": 391, "sw420": false, "sw420Hits": 3,
+        "peakMagMg": 4820, "sw420": false, "sw420Hits": 3,
         "score": 72, "queueDepth": 4, "heapFree": 142336, "uptimeMs": 423119,
         "watchdogResets": 0, "loopOverageCount": 0
       }''';
@@ -448,7 +444,12 @@ void main() {
         "chipId": "A1B2C3D4", "mac": "24:6F:28:A1:B2:C3:D4",
         "name": "SAAS-A1B2C3D4", "batteryMv": 4120, "batteryPct": 96,
         "charging": false, "uptimeMs": 123456,
-        "mpu": { "present": true, "addr": "0x68", "whoAmI": 113 },
+        "sensor": {
+          "part": "ADXL345",
+          "present": true,
+          "addr": "0x53",
+          "deviceId": 229
+        },
         "oled": { "present": true, "addr": "0x3C" },
         "sw420": true, "calibrated": true, "sensorRateHz": 50, "state": 1
       }''';
@@ -462,15 +463,15 @@ void main() {
       expect(h.mac, '24:6F:28:A1:B2:C3:D4');
       expect(h.batteryPct, 96);
       expect(h.state, DeviceState.idle);
-      expect(h.mpu!.present, isTrue);
-      expect(h.mpu!.addr, '0x68');
-      expect(h.mpu!.whoAmI, 113);
+      expect(h.sensor!.present, isTrue);
+      expect(h.sensor!.part, 'ADXL345');
+      expect(h.sensor!.addr, '0x53');
+      expect(h.sensor!.deviceId, 229);
       expect(
-        h.mpu!.whoAmIName,
-        'MPU-9250/MPU-9255',
-        reason: '113 == 0x71, which is what §6.2 actually sends',
+        h.sensor!.isExpectedPart,
+        isTrue,
+        reason: '229 == 0xE5, the ADXL345 DEVID',
       );
-      expect(h.mpu!.isKnownImu, isTrue);
       expect(h.oled!.present, isTrue);
       expect(h.sw420, isTrue);
       expect(h.calibrated, isTrue);
@@ -485,7 +486,12 @@ void main() {
         "chipId": "A1B2C3D4", "mac": "24:6F:28:A1:B2:C3:D4",
         "name": "SAAS-A1B2C3D4", "batteryMv": 3900, "batteryPct": 80,
         "charging": false, "uptimeMs": 1000,
-        "mpu": { "present": true, "addr": "0x68", "whoAmI": 113 },
+        "sensor": {
+          "part": "ADXL345",
+          "present": true,
+          "addr": "0x53",
+          "deviceId": 229
+        },
         "sw420": true, "calibrated": false, "sensorRateHz": 50, "state": 1
       }''';
       final HelloAckMessage h = MessageCodec.parseJson(
@@ -497,43 +503,42 @@ void main() {
       expect(h.calibrated, isFalse);
     });
 
-    test('an unrecognised WHO_AM_I is flagged without breaking the node', () {
-      final MpuInfo m = MpuInfo.fromJson(<String, Object?>{
+    test('a device ID that is not the ADXL345 is flagged, not trusted', () {
+      final SensorInfo m = SensorInfo.fromJson(<String, Object?>{
         'present': true,
-        'addr': '0x68',
-        'whoAmI': 0x2A,
+        'addr': '0x53',
+        'deviceId': 0x2A,
       });
       expect(m.present, isTrue, reason: 'something did answer on the bus');
-      expect(m.isKnownImu, isFalse, reason: 'but not a part we recognise');
-      expect(m.whoAmIName, isNull);
+      expect(
+        m.isExpectedPart,
+        isFalse,
+        reason: 'but it is not the part this firmware reads',
+      );
     });
 
-    test('a failed WHO_AM_I read is not the same as an unknown part', () {
-      final MpuInfo m = MpuInfo.fromJson(<String, Object?>{
+    test('a failed DEVID read is not the same as an absent sensor', () {
+      final SensorInfo m = SensorInfo.fromJson(<String, Object?>{
         'present': true,
-        'addr': '0x68',
+        'addr': '0x53',
       });
-      expect(m.whoAmI, isNull);
-      expect(m.isKnownImu, isFalse);
-      expect(m.whoAmIName, isNull);
+      expect(m.deviceId, isNull);
+      expect(m.isExpectedPart, isFalse);
       expect(
-        m.toJson().containsKey('whoAmI'),
+        m.toJson().containsKey('deviceId'),
         isFalse,
         reason: 'an absent read is omitted, not sent as 0',
       );
     });
 
-    test('every known IMU identity byte round trips through the table', () {
-      MpuInfo.imuNames.forEach((int whoAmI, String name) {
-        final MpuInfo m = MpuInfo(
-          present: true,
-          addr: '0x68',
-          whoAmI: whoAmI,
-        );
-        expect(m.whoAmIName, name);
-        expect(m.isKnownImu, isTrue);
-        expect(MpuInfo.fromJson(m.toJson()).whoAmIName, name);
-      });
+    test('the sensor object round trips through its JSON form', () {
+      const SensorInfo m = SensorInfo(
+        present: true,
+        part: 'ADXL345',
+        addr: '0x1D',
+        deviceId: SensorInfo.expectedDeviceId,
+      );
+      expect(SensorInfo.fromJson(m.toJson()).toJson(), m.toJson());
     });
   });
 
@@ -543,9 +548,6 @@ void main() {
       'acc_x': 12,
       'acc_y': -34,
       'acc_z': 1002,
-      'gyr_x': 3,
-      'gyr_y': -1,
-      'gyr_z': 5,
       'sw420': false,
     };
 
@@ -584,9 +586,6 @@ void main() {
           accX: 12,
           accY: -34,
           accZ: 1002,
-          gyrX: 3,
-          gyrY: -1,
-          gyrZ: 5,
           sw420: false,
         ),
       ]);
@@ -642,7 +641,7 @@ void main() {
         "uptimeMs": 423119, "cpuLoadPct": 18, "loopHz": 50,
         "heapFree": 142336, "heapMin": 138204, "stackHighWater": 4096,
         "queueDepth": 4, "droppedFrames": 0, "crcErrors": 0, "bleClients": 1,
-        "mpuI2cErrors": 0, "oledOk": true, "brownoutCount": 0,
+        "sensorI2cErrors": 0, "oledOk": true, "brownoutCount": 0,
         "watchdogResets": 0, "batteryMv": 4120, "rssi": -58
       }''';
       final DiagMessage d = MessageCodec.parseJson(
@@ -661,13 +660,13 @@ void main() {
         heapFree: 20000,
         watchdogResets: 2,
         brownoutCount: 1,
-        mpuI2cErrors: 5,
+        sensorI2cErrors: 5,
         oledOk: false,
         droppedFrames: 3,
       );
       expect(d.faults, contains('watchdog reset x2'));
       expect(d.faults, contains('brownout x1'));
-      expect(d.faults, contains('MPU I2C errors x5'));
+      expect(d.faults, contains('Sensor I2C errors x5'));
       expect(d.faults, contains('OLED not responding'));
       expect(d.faults, contains('3 telemetry frames dropped'));
       expect(d.faults, contains('low heap: 20000 bytes free'));
