@@ -19,7 +19,23 @@ namespace proto {
 constexpr uint8_t kSof0 = 0xA5;
 constexpr uint8_t kSof1 = 0x5A;
 constexpr uint16_t kMaxPayload = 512;
-constexpr size_t kTelemetrySize = 24;
+/// Telemetry record size.
+///
+/// v1 was 24 bytes: tMs(4) + accel(6) + gyro(6) + mag(2) + peak(2) + 4 bytes of
+/// flags/score/battery/state. The ADXL345 has no gyroscope, so the six gyro
+/// bytes were removed outright rather than zero-filled. Sending zeros would
+/// have been the cheaper change and the worse one: a stream of exactly-zero
+/// rotation rate reads as a healthy gyro on a node that has none, and any trend
+/// or alerting built on it would be confidently wrong.
+///
+/// 18 bytes is also a third fewer to move at the default 10 Hz, and the record
+/// is already well under the 20-byte-att characteristic-level floor that
+/// fragmentation and power draw care about, so the saving is real but modest.
+constexpr size_t kTelemetrySize = 18;
+/// Wire version. v2 is the ADXL345 layout above; v1 was the six-axis MPU6050
+/// record. The scanner refuses anything but the version it implements, so an
+/// old app and a new node cannot half-talk.
+constexpr uint8_t kProtocolVersion = 2;
 /// SOF0 SOF1 VER TYPE LEN_L LEN_H. The payload always starts at offset 6.
 constexpr size_t kHeaderSize = 6;
 /// Frame overhead: header + CRC_L CRC_H.
@@ -99,15 +115,12 @@ enum Flag : uint8_t {
   kFlagCharging = 0x80,
 };
 
-/// The 24-byte record as plain fields. Packing is one memcpy, no branches.
+/// The 18-byte record as plain fields. Packing is one memcpy, no branches.
 struct Telemetry {
   uint32_t tMs;
   int16_t axMg;
   int16_t ayMg;
   int16_t azMg;
-  int16_t gxDps10;
-  int16_t gyDps10;
-  int16_t gzDps10;
   uint16_t magMg;
   uint16_t peakMg;
   uint8_t flags;
@@ -116,9 +129,9 @@ struct Telemetry {
   uint8_t state;
 };
 
-/// Serialises `t` into exactly 24 little-endian bytes. Returns kTelemetrySize.
+/// Serialises `t` into exactly 18 little-endian bytes. Returns kTelemetrySize.
 size_t packTelemetry(uint8_t* out, const Telemetry& t);
-/// Parses 24 bytes. Returns false when `len < 24`.
+/// Parses 18 bytes. Returns false when `len < 18`.
 bool unpackTelemetry(const uint8_t* in, size_t len, Telemetry& out);
 
 // ---------------------------------------------------------------------------

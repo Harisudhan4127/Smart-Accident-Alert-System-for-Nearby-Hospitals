@@ -137,9 +137,6 @@ size_t packTelemetry(uint8_t* out, const Telemetry& t) {
   putI16(out + o, t.axMg); o += 2;
   putI16(out + o, t.ayMg); o += 2;
   putI16(out + o, t.azMg); o += 2;
-  putI16(out + o, t.gxDps10); o += 2;
-  putI16(out + o, t.gyDps10); o += 2;
-  putI16(out + o, t.gzDps10); o += 2;
   putU16(out + o, clampU16(t.magMg)); o += 2;
   putU16(out + o, clampU16(t.peakMg)); o += 2;
   out[o++] = t.flags;
@@ -158,9 +155,6 @@ bool unpackTelemetry(const uint8_t* in, size_t len, Telemetry& out) {
   out.axMg = getI16(in + o); o += 2;
   out.ayMg = getI16(in + o); o += 2;
   out.azMg = getI16(in + o); o += 2;
-  out.gxDps10 = getI16(in + o); o += 2;
-  out.gyDps10 = getI16(in + o); o += 2;
-  out.gzDps10 = getI16(in + o); o += 2;
   out.magMg = getU16(in + o); o += 2;
   out.peakMg = getU16(in + o); o += 2;
   out.flags = in[o++];
@@ -180,7 +174,7 @@ size_t encode(uint8_t* out, size_t cap, uint8_t type, const uint8_t* payload,
   if (cap < len + kFrameOverhead) return 0;
   out[0] = kSof0;
   out[1] = kSof1;
-  out[2] = 1;  // VER — the scanner rejects anything else
+  out[2] = kProtocolVersion;  // the scanner rejects anything else
   out[3] = type;
   out[4] = static_cast<uint8_t>(len & 0xFFu);
   out[5] = static_cast<uint8_t>((len >> 8) & 0xFFu);
