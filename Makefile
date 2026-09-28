@@ -119,22 +119,28 @@ format: ## Auto-format the app
 ## ── firmware ─────────────────────────────────────────────────────────────────
 
 # The sketch is a plain Arduino project, so `arduino-cli` needs the FQBN plus an
-# explicit library list. NimBLE is the one non-default dependency.
-LIBS := --library "MFRC522" 2>/dev/null || true
+# explicit library list. The motion sensor is an ADXL345; the MPU6050 and its
+# Unified Sensor dependency were removed with the gyro path.
 ARDUINO_LIBS = \
 	--library "NimBLE-Arduino" \
 	--library "Adafruit SSD1306" \
 	--library "Adafruit GFX Library" \
 	--library "Adafruit BusIO" \
-	--library "Adafruit MPU6050" \
+	--library "Adafruit ADXL345" \
 	--library "Adafruit Unified Sensor"
 
 .PHONY: firmware
 firmware: ## Compile the ESP32 sketch (no upload)
 	@$(call require,arduino-cli,"curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh")
 	@printf "$(BLUE)Compiling$(NC) $(FIRMWARE)\n"
+# The ESP32 macro is defined here as well as by the core. arduino-esp32 puts
+# -DESP32=ESP32 in `build.extra_flags`, which reaches the sketch but NOT the
+# libraries, and several Adafruit libraries (SSD1306 2.5.17 among them) guard
+# their platform includes on that macro. Without it they fall through to an
+# AVR-only branch and fail on <util/delay.h>. The Arduino IDE does pass it, which
+# is why this only ever bites on the command line.
 	arduino-cli compile --fqbn $(FQBN) $(ARDUINO_LIBS) \
-		--build-property "build.extra_flags=-D SAAS_FW_VERSION='\"$(FW_VERSION)\"' -D SAAS_FW_BUILD=$(BUILD_DATE)" \
+		--build-property "build.extra_flags=-D ESP32=ESP32 -D SAAS_FW_VERSION='\"$(FW_VERSION)\"' -D SAAS_FW_BUILD=$(BUILD_DATE)" \
 		$(FIRMWARE)
 
 .PHONY: firmware-upload
@@ -170,8 +176,16 @@ app-demo: ## Run the app with no hardware, using the built-in ESP32 simulator
 	cd $(APP) && flutter run --dart-define=DEMO=true
 
 .PHONY: app-build-apk
-app-build-apk: ## Build a release APK
+app-build-apk: ## Build a release APK (universal, ~60 MB)
 	cd $(APP) && flutter build apk --release
+
+.PHONY: app-build-apk-split
+app-build-apk-split: ## Build per-ABI release APKs (~20 MB each)
+	cd $(APP) && flutter build apk --release --split-per-abi
+
+.PHONY: app-build-bundle
+app-build-bundle: ## Build an App Bundle, which is what Play Store wants
+	cd $(APP) && flutter build appbundle --release
 
 .PHONY: app-build-ios
 app-build-ios: ## Build a release iOS build (needs macOS + Xcode)
