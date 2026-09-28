@@ -118,12 +118,50 @@ constexpr uint32_t kUiPeriodMs = 100;
 constexpr uint32_t kSysPeriodMs = 1000;
 constexpr uint16_t kWatchdogTimeoutS = 5;
 
-/// DLPF setting written to MPU CONFIG register. 3 => 44 Hz accel / 42 Hz gyro
-/// bandwidth at a 1 kHz internal output rate. We read the newest sample pair at
-/// 50 Hz, so the effective anti-aliasing matches the detector rate.
-constexpr uint8_t kMpuDlpf = 3;
-constexpr int8_t kMpuAccelRangeG = 4;    // +/-4 g
-constexpr int16_t kMpuGyroRangeDps = 500;  // +/-500 deg/s (int16: 500 does not fit int8)
+// ── ADXL345 configuration ───────────────────────────────────────────────────
+//
+// The ADXL345 is an ACCELEROMETER ONLY. It has no gyroscope, no magnetometer and
+// no temperature output on this interface, and nothing in this firmware may
+// claim otherwise. Every rotation-related term that the previous MPU6050-based
+// design used has been replaced with an accelerometer-derived equivalent; see
+// `namespace wt` below and detector.cpp for the reasoning.
+//
+// I2C address. The part has two, selected by the SDO / ALT_ADDRESS pin:
+//   0x53  SDO tied LOW  (the default on most breakout boards -- assumed here)
+//   0x1D  SDO tied HIGH
+// 0x53 is the safe default because it collides with nothing else on the bus:
+// the SSD1306 OLED is at 0x3C and the SW-420 is a plain GPIO. See
+// docs/03-hardware-and-wiring.md.
+constexpr uint8_t kAdxlAddr = 0x53;
+/// The alternative address, accepted as a fallback if 0x53 does not answer.
+/// Two devices on one bus would need this, but 0x53/0x1D/0x3C are mutually
+/// exclusive, so a scan can always tell them apart.
+constexpr uint8_t kAdxlAddrAlt = 0x1D;
+
+/// ODR. The part's own ODR is the anti-aliaser for the bus, so it must sit at
+/// or above the detector rate. 100 Hz is the lowest rate that comfortably
+/// covers the 50 Hz loop, and it is the part's lowest power-consumption rate
+/// that still oversamples us (ADXL345_DATARATE_100_HZ = 50 Hz bandwidth).
+constexpr uint8_t kAdxlOdr = 0x0A;
+
+/// Full-scale range. +/-16 g, chosen so a genuinely hard crash cannot clip:
+/// a 13-bit count at 3.9 mg/LSB gives +/-31.9 g per axis, and the detector's
+/// kAbsFullMg knee is only 6 g. Clipping here would flatten the very peaks the
+/// severity term is there to measure.
+///
+/// Note that at FULL_RES the LSB is 3.9 mg on EVERY range, so choosing the
+/// widest range costs no resolution for our thresholds (the smallest one we act
+/// on is the 300 mg free-fall floor).
+constexpr uint8_t kAdxlRange16G = 0x0B;  ///< ADXL345_RANGE_16_G
+
+/// How many consecutive identical samples count as a dead sensor. 1 second at
+/// 50 Hz: a still vehicle legitimately repeats the same count for much longer,
+/// so the test cannot trip on stillness -- but a bus that has gone open or a
+/// part that has stopped answering freezes on one value immediately. Reporting
+/// that as a SENSOR FAULT is the difference between "the node is not listening"
+/// and "the node thinks everything is fine".
+constexpr uint8_t kAdxlFrozenRuns = 50;
+
 
 // ---------------------------------------------------------------------------
 // Filter coefficients (Q15, integer) — detector input conditioning
@@ -133,9 +171,6 @@ constexpr int16_t kMpuGyroRangeDps = 500;  // +/-500 deg/s (int16: 500 does not 
 /// 4 taps @ 50 Hz = 80 ms; enough to kill I2C ringing without visibly lagging
 /// gravity. The impact path is deliberately unfiltered -- see sensors.h.
 constexpr uint8_t kMaTaps = 4;
-/// Moving average on the FAST gyro path. 2 taps @ 50 Hz = 40 ms, the most
-/// smoothing that leaves a 40 ms rotation pulse intact.
-constexpr uint8_t kGyroMaTaps = 2;
 /// First-order gravity tracker time constant used to split linear / gravity accel.
 constexpr uint8_t kGravityTaps = 48;  // ~1 s
 
@@ -146,10 +181,17 @@ constexpr int32_t kGravityAlphaQ15 = 649;  // 0.019801 = 1 - exp(-0.02/1.0)
 static_assert(kGravityAlphaQ15 > 0 && kGravityAlphaQ15 < 32768,
               "gravity IIR coefficient must be a sane Q15 fraction");
 
-/// MPU6050 sensitivity at the ranges configured above. These are the numbers in
-/// the MPU-6000 register map, not tuning knobs.
-constexpr int32_t kAccelLsbPerG = 16384;   // AFS_SEL = +-4 g
-constexpr int32_t kGyroLsbPerDps = 131;     // FS_SEL = +-500 deg/s
+/// ADXL345 sensitivity with FULL_RES set (which `setRange()` always sets), in
+/// tenths of a milli-g per LSB. This is fixed by the part -- 3.9 mg/LSB on every
+/// full-scale range -- and is NOT a tuning knob.
+///
+/// The raw data registers hold 13 significant bits left-justified in 16, so the
+/// conversion is (raw >> 3) * 39 / 10. Integer throughout: the sensor's 3 LSBs
+/// of padding are discarded by the shift and the 3.9 mg scale is applied as an
+/// exact rational, so there is no float anywhere in the acquisition path.
+constexpr int32_t kAdxlMilliTenthsPerLsb = 39;  // 3.9 mg == 39 tenths of a mg
+constexpr uint8_t kAdxlRawShift = 3;              // 16-bit register -> 13-bit value
+
 
 /// SW-420 contact debounce. The module is a vibration-sensitive microswitch and
 /// chatters for milliseconds; 25 ms is long enough to reject it and short enough
@@ -161,16 +203,38 @@ constexpr uint16_t kSw420DebounceMs = 25;
 // ---------------------------------------------------------------------------
 
 namespace wt {
-constexpr uint16_t kFreeFall = 260;  // 0.26  loss of contact, |a| < 0.3 g
-constexpr uint16_t kZScore = 200;    // 0.20  accel surprise vs rolling baseline
-constexpr uint16_t kSw420 = 150;     // 0.15  independent mechanical switch
-constexpr uint16_t kGyro = 120;      // 0.12  rotation during the event
-constexpr uint16_t kAbsMag = 110;    // 0.11  absolute severity
-constexpr uint16_t kOrient = 100;    // 0.10  gravity-vector rotation
+constexpr uint16_t kFreeFall = 300;  // 0.30  loss of contact, |a| < 0.3 g
+constexpr uint16_t kZScore = 230;    // 0.23  accel surprise vs rolling baseline
+constexpr uint16_t kSw420 = 170;     // 0.17  independent mechanical switch
+constexpr uint16_t kAbsMag = 130;    // 0.13  absolute severity
+constexpr uint16_t kOrient = 110;    // 0.11  gravity-vector rotation (accel-derived)
 constexpr uint16_t kJerk = 60;       // 0.06  d|mag|/dt
-constexpr uint16_t kSum = kFreeFall + kZScore + kSw420 + kGyro + kAbsMag + kOrient + kJerk;
+constexpr uint16_t kSum = kFreeFall + kZScore + kSw420 + kAbsMag + kOrient + kJerk;
 static_assert(kSum == 1000, "fusion weights must sum to 1000 (= 1.000)");
 }  // namespace wt
+
+// The previous design carried a 7th term worth 0.12 for gyroscope rotation
+// during the event. The ADXL345 has no gyroscope, so that term is GONE, not
+// faked. Its 120 points are redistributed across the six surviving
+// accelerometer-derived terms in proportion to their existing weight, so the
+// detector's *sensitivity* is preserved rather than quietly reduced.
+//
+//   before  260 200 150 [120] 110 100  60
+//   after   300 230 170       130 110  60
+//
+// A rollover is still detected, because a rollover changes which way gravity
+// points relative to the vehicle. That is exactly what the kOrient term already
+// measures, from the accelerometer alone. What is genuinely lost is the
+// ability to distinguish "spun in place" from "tilted" -- which does not occur
+// in the crashes this system is trying to catch.
+//
+// CONSEQUENCE: kTripScore below is UNCHANGED, so the bar to trip is identical,
+// but every term now leans on the same underlying measurement (magnitude over
+// time). The terms are still independent evidence -- free-fall is a floor, the
+// z-score is a surprise, SW-420 is a second physical sensor, orientation is a
+// vector rotation, jerk is a derivative -- so a single artefact cannot
+// manufacture a trip. Still: these weights have NOT been re-validated against
+// real crash data and the on-road procedure in docs/10-testing.md must be re-run.
 
 /// Trip / release hysteresis on the 0..100 fused score.
 constexpr uint8_t kTripScore = 70;
@@ -181,12 +245,15 @@ constexpr uint8_t kReleaseScore = 45;
 namespace knee {
 constexpr int16_t kZOnMilli = 4000;    ///< 4.0 sigma
 constexpr int16_t kZFullMilli = 12000;  ///< 12.0 sigma
-/// The MPU is ranged +/-4 g on all three axes, so |a| tops out at
-/// 4*sqrt(3) = 6.93 g. A "full" knee of 8 g would be unreachable and the term
-/// could never score, which would silently redistribute its weight; 6 g is.
+/// The ADXL345 is ranged +/-16 g on all three axes, so |a| tops out at
+/// 16*sqrt(3) = 27.7 g. A "full" knee of 8 g would be unreachable and the term
+/// could never score, which would silently redistribute its weight; 6 g is
+/// comfortably inside the part's range and just above a severe crash.
 constexpr uint16_t kAbsFullMg = 6000;
-/// Likewise the gyro is ranged +/-500 deg/s per axis (866 for a 3-axis vector).
-constexpr int32_t kGyroFullDps10 = 6000;  ///< 600.0 deg/s
+/// Orientation change is measured as the angle between the pre-impact and
+/// post-impact GRAVITY VECTORS -- both come from the accelerometer, so this term
+/// survives the loss of the gyroscope. A rollover swings gravity through tens of
+/// degrees; a pothole springs back to where it started.
 constexpr int16_t kOrientOnDeg10 = 150;   ///< 15.0 degrees
 constexpr int16_t kOrientFullDeg10 = 600;  ///< 60.0 degrees
 constexpr int32_t kJerkOnMgPerS = 5000;
@@ -269,15 +336,52 @@ constexpr uint8_t kHelloAckMaxRetries = 5;    ///< seq 0, retried harder
 constexpr uint16_t kHelloAckRetryMs = 400;
 
 // ---------------------------------------------------------------------------
+// The four parameters the specification names explicitly.
+//
+// These are EXPERIMENTAL. They are gathered here, in one block, because they are
+// the only numbers in the firmware that cannot be justified from a datasheet —
+// every other constant is either a register value or a filter coefficient. They
+// are starting points for the road test in docs/10-testing.md, NOT validated
+// thresholds, and the file carries no claim that they have seen real crash data.
+// ---------------------------------------------------------------------------
+
+/// ACCELERATION_THRESHOLD — the |a| (in milli-g) that counts as an impact
+/// candidate. 3.0 g separates a hard pothole (0.4–1.2 g) from a low-speed
+/// collision (2.5–5 g) and a serious one (6–15 g) with room above it.
+/// Also the user-facing "impact threshold" in CONFIG, clamped to the range above.
+constexpr int32_t kAccelerationThresholdMg = 3000;
+
+/// VIBRATION_CONFIRMATION_WINDOW — how close in time the ADXL345 peak and an
+/// SW-420 assertion must be to corroborate each other. 400 ms is roughly the
+/// duration of the impact transient itself, so "within the same bump" is true
+/// and "within the same drive" is not. Widen it and a pothole twenty seconds
+/// after a kerb starts counting; narrow it and a real crash whose microswitch
+/// fires a few samples late stops counting.
+constexpr uint16_t kVibrationConfirmationWindowMs = 400;
+
+/// ACCIDENT_CONFIRMATION_TIME — how long the fused score must stay above the
+/// trip level before the event is declared. 60 ms is three consecutive 50 Hz
+/// samples, which rejects a single-sample electrical spike without delaying a
+/// real crash by anything a person would notice.
+constexpr uint16_t kAccidentConfirmationTimeMs = 60;
+
+/// CANCEL_COUNTDOWN_SECONDS — the window the driver has to call a false alarm
+/// before anything is sent. Long enough to react to a pothole, short enough
+/// that a real crash is not delayed past the point where it matters.
+constexpr uint16_t kCancelCountdownSeconds = 10;
+
+// ---------------------------------------------------------------------------
 // CONFIRM / countdown defaults — docs/02-ble-protocol.md §6.4
 // ---------------------------------------------------------------------------
 
+// The configurable impact threshold. The ADXL345 is ranged +/-16 g, so the
+// maximum was raised from the old +/-4 g ceiling (8000) to 16000: a hard crash
+// on the new part can legitimately exceed 8 g without clipping.
 constexpr uint16_t kCfgAccelThresholdMgDefault = 3000;
 constexpr uint16_t kCfgAccelThresholdMgMin = 1500;
-constexpr uint16_t kCfgAccelThresholdMgMax = 8000;
-constexpr uint16_t kCfgGyroThresholdDpsDefault = 220;  // stored as 22.0 dps*10
-constexpr uint16_t kCfgGyroThresholdDps10Min = 800;     // 80.0 dps
-constexpr uint16_t kCfgGyroThresholdDps10Max = 8000;    // 800.0 dps
+constexpr uint16_t kCfgAccelThresholdMgMax = 16000;
+// NOTE: there is no gyro threshold, because there is no gyroscope. The
+// `gyroThresholdDps` key is gone from the CONFIG wire format (protocol v2).
 constexpr uint16_t kCfgDebounceMsDefault = 60;
 constexpr uint16_t kCfgDebounceMsMin = 20;
 constexpr uint16_t kCfgDebounceMsMax = 500;
