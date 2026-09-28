@@ -1,4 +1,4 @@
-/// Telemetry codec (§5): the 24-byte binary record, in and out.
+/// Telemetry codec (§5): the 18-byte binary record, in and out.
 ///
 /// ## The rounding trap
 ///
@@ -30,7 +30,7 @@ import '../../domain/entities/telemetry.dart';
 // instead of `ble_frame.dart`'s top-level frame builder.
 import 'ble_frame.dart' as wire;
 
-/// Encode/decode the 24-byte telemetry record (§5).
+/// Encode/decode the 18-byte telemetry record (§5).
 abstract final class TelemetryCodec {
   /// Decode [payload] into a [TelemetryRecord], or `null` if it is not exactly
   /// [telemetryRecordBytes] long.
@@ -48,15 +48,12 @@ abstract final class TelemetryCodec {
       accX: view.getInt16(4, Endian.little),
       accY: view.getInt16(6, Endian.little),
       accZ: view.getInt16(8, Endian.little),
-      gyrX: view.getInt16(10, Endian.little),
-      gyrY: view.getInt16(12, Endian.little),
-      gyrZ: view.getInt16(14, Endian.little),
-      magMg: view.getUint16(16, Endian.little),
-      peakMg: view.getUint16(18, Endian.little),
-      flags: TelemetryFlags.fromByte(payload[20]),
-      impactScore: payload[21],
-      batteryPct: payload[22],
-      state: DeviceState.fromByte(payload[23]),
+      magMg: view.getUint16(10, Endian.little),
+      peakMg: view.getUint16(12, Endian.little),
+      flags: TelemetryFlags.fromByte(payload[14]),
+      impactScore: payload[15],
+      batteryPct: payload[16],
+      state: DeviceState.fromByte(payload[17]),
     );
   }
 
@@ -88,7 +85,7 @@ abstract final class TelemetryCodec {
     return Ok<TelemetryRecord>(record);
   }
 
-  /// Encode [record] to its 24 wire bytes (§5).
+  /// Encode [record] to its 18 wire bytes (§5).
   static Uint8List encode(TelemetryRecord record) => record.toBytes();
 
   /// Encode a whole `TELEMETRY` frame (§3 + §5).
@@ -127,7 +124,8 @@ int jsRoundToInt(double value) {
 /// JS `Math.round(value * 10^decimals) / 10^decimals`.
 ///
 /// Used for the derived values the reference prints with 1 or 2 decimal places
-/// (`impact.magG = 4.82`, `gyrMagDps = 402.1`). Powers of ten are tabulated
+/// (`impact.magG = 4.82`, `impact.orientationChangeDeg = 63.4`). Powers of
+/// ten are tabulated
 /// rather than computed with `pow` so the result is exact for the small
 /// exponents in use, instead of being 0.30000000000000004-ish.
 double jsRound(double value, int decimals) {
@@ -209,9 +207,6 @@ Uint8List encodeTelemetryFields({
   required double ax,
   required double ay,
   required double az,
-  required double gx,
-  required double gy,
-  required double gz,
   required double magMg,
   required double peakMg,
   required int flags,
@@ -225,15 +220,12 @@ Uint8List encodeTelemetryFields({
   view.setInt16(4, clampI16(ax), Endian.little);
   view.setInt16(6, clampI16(ay), Endian.little);
   view.setInt16(8, clampI16(az), Endian.little);
-  view.setInt16(10, clampI16(gx), Endian.little);
-  view.setInt16(12, clampI16(gy), Endian.little);
-  view.setInt16(14, clampI16(gz), Endian.little);
-  view.setUint16(16, clampU16(magMg), Endian.little);
-  view.setUint16(18, clampU16(peakMg), Endian.little);
-  out[20] = flags & 0xFF;
-  out[21] = clampByte(score);
-  out[22] = clampByte(batteryPct);
-  out[23] = state & 0xFF;
+  view.setUint16(10, clampU16(magMg), Endian.little);
+  view.setUint16(12, clampU16(peakMg), Endian.little);
+  out[14] = flags & 0xFF;
+  out[15] = clampByte(score);
+  out[16] = clampByte(batteryPct);
+  out[17] = state & 0xFF;
   return out;
 }
 
@@ -241,16 +233,13 @@ Uint8List encodeTelemetryFields({
 ///
 /// Only used to diff a decoded record against `golden.json`'s `telemetry`
 /// object, which is why the field names are the reference's short ones
-/// (`ax`, `gx`, `score`) rather than the domain's.
+/// (`ax`, `score`) rather than the domain's.
 Map<String, Object?> telemetryToReferenceJson(TelemetryRecord record) =>
     <String, Object?>{
       'tMs': record.tMs,
       'ax': record.accX,
       'ay': record.accY,
       'az': record.accZ,
-      'gx': record.gyrX,
-      'gy': record.gyrY,
-      'gz': record.gyrZ,
       'magMg': record.magMg,
       'peakMg': record.peakMg,
       'flags': record.flags.toByte(),

@@ -1,8 +1,8 @@
 /// The 50 Hz telemetry record (§5) and the flag bitfield it carries.
 ///
-/// **Why this is a domain object and not a byte view.** The wire record is 24
-/// bytes of little-endian integers in *milli-g* and *tenths of a degree per
-/// second*. Nothing above the protocol layer should ever see those units: a
+/// **Why this is a domain object and not a byte view.** The wire record is 18
+/// bytes of little-endian integers in *milli-g*. Nothing above the protocol
+/// layer should ever see those units: a
 /// sparkline wants g, a threshold slider wants g, the detector comparison wants
 /// g. So the entity keeps the raw integers (for the diagnostics view and for
 /// lossless round-tripping) *and* exposes the derived physical values, and the
@@ -73,7 +73,7 @@ enum DeviceState {
   /// Whether the detector is running in this state.
   ///
   /// [fault] and [boot] are excluded: showing a live accelerometer trace from a
-  /// device whose MPU6050 is not answering is worse than showing nothing.
+  /// device whose ADXL345 is not answering is worse than showing nothing.
   bool get isArmed => switch (this) {
         DeviceState.idle ||
         DeviceState.pending ||
@@ -245,26 +245,23 @@ const int kMilliGMax = 32000;
 /// Sentinel for "battery percentage unknown" (§5, byte 22).
 const int kBatteryUnknown = 255;
 
-/// One decoded 24-byte telemetry record (§5).
+/// One decoded 18-byte telemetry record (§5).
 ///
 /// Immutable and value-equal, which is what lets the throttled UI stream
 /// deduplicate: two identical consecutive records can be dropped without
 /// rebuilding anything.
 @immutable
 class TelemetryRecord {
-  /// One 24-byte sample, as sent on the wire (§5).
+  /// One 18-byte sample, as sent on the wire (§5).
   ///
-  /// Every field is stored in its *wire* unit — milli-g, tenths of a
-  /// degree per second — so equality, [toBytes] and the conformance
-  /// vectors all agree. The `accXG`/`magG`/… getters convert.
+  /// Every field is stored in its *wire* unit — milli-g — so equality,
+  /// [toBytes] and the conformance vectors all agree. The
+  /// `accXG`/`magG`/… getters convert.
   const TelemetryRecord({
     required this.tMs,
     required this.accX,
     required this.accY,
     required this.accZ,
-    required this.gyrX,
-    required this.gyrY,
-    required this.gyrZ,
     required this.magMg,
     required this.peakMg,
     required this.flags,
@@ -282,23 +279,10 @@ class TelemetryRecord {
   final int accX;
 
   /// Accelerometer Y, milli-g.
-  /// Accelerometer Y in milli-g.
   final int accY;
 
   /// Accelerometer Z, milli-g.
-  /// Accelerometer Z in milli-g.
   final int accZ;
-
-  /// Gyroscope X, tenths of a degree per second.
-  final int gyrX;
-
-  /// Gyroscope Y, tenths of a degree per second.
-  /// Gyroscope Y in tenths of a degree per second.
-  final int gyrY;
-
-  /// Gyroscope Z, tenths of a degree per second.
-  /// Gyroscope Z in tenths of a degree per second.
-  final int gyrZ;
 
   /// Magnitude of the acceleration vector, milli-g (§5).
   final int magMg;
@@ -339,15 +323,6 @@ class TelemetryRecord {
   /// Accelerometer Z in g.
   double get accZG => accZ / 1000.0;
 
-  /// Gyroscope X in °/s.
-  double get gyrXDps => gyrX / 10.0;
-
-  /// Gyroscope Y in °/s.
-  double get gyrYDps => gyrY / 10.0;
-
-  /// Gyroscope Z in °/s.
-  double get gyrZDps => gyrZ / 10.0;
-
   /// Magnitude in g.
   double get magG => magMg / 1000.0;
 
@@ -361,9 +336,6 @@ class TelemetryRecord {
   /// not line up with the threshold the firmware is comparing against. Both are
   /// available; the UI picks.
   double get accVectorG => _magnitude3(accXG, accYG, accZG);
-
-  /// Vector magnitude of the three gyroscope axes in °/s.
-  double get gyrVectorDps => _magnitude3(gyrXDps, gyrYDps, gyrZDps);
 
   /// Whether this sample's magnitude has reached the threshold the *app* is
   /// configured to consider notable.
@@ -383,9 +355,6 @@ class TelemetryRecord {
     int? accX,
     int? accY,
     int? accZ,
-    int? gyrX,
-    int? gyrY,
-    int? gyrZ,
     int? magMg,
     int? peakMg,
     TelemetryFlags? flags,
@@ -398,9 +367,6 @@ class TelemetryRecord {
         accX: accX ?? this.accX,
         accY: accY ?? this.accY,
         accZ: accZ ?? this.accZ,
-        gyrX: gyrX ?? this.gyrX,
-        gyrY: gyrY ?? this.gyrY,
-        gyrZ: gyrZ ?? this.gyrZ,
         magMg: magMg ?? this.magMg,
         peakMg: peakMg ?? this.peakMg,
         flags: flags ?? this.flags,
@@ -409,7 +375,7 @@ class TelemetryRecord {
         state: state ?? this.state,
       );
 
-  /// Encode back to the 24 wire bytes (§5), little-endian.
+  /// Encode back to the 18 wire bytes (§5), little-endian.
   ///
   /// Present so a test can assert `decode(encode(x)) == x` and so the simulator
   /// feed can produce records with the exact layout the firmware uses.
@@ -420,21 +386,18 @@ class TelemetryRecord {
     view.setInt16(4, accX, Endian.little);
     view.setInt16(6, accY, Endian.little);
     view.setInt16(8, accZ, Endian.little);
-    view.setInt16(10, gyrX, Endian.little);
-    view.setInt16(12, gyrY, Endian.little);
-    view.setInt16(14, gyrZ, Endian.little);
-    view.setUint16(16, magMg, Endian.little);
-    view.setUint16(18, peakMg, Endian.little);
-    out[20] = flags.toByte();
-    out[21] = impactScore & 0xFF;
-    out[22] = batteryPct & 0xFF;
-    out[23] = state.byte & 0xFF;
+    view.setUint16(10, magMg, Endian.little);
+    view.setUint16(12, peakMg, Endian.little);
+    out[14] = flags.toByte();
+    out[15] = impactScore & 0xFF;
+    out[16] = batteryPct & 0xFF;
+    out[17] = state.byte & 0xFF;
     return out;
   }
 
   @override
   String toString() => 'TelemetryRecord(t=${tMs}ms, '
-      'acc=$accX/$accY/$accZ mg, gyr=$gyrX/$gyrY/$gyrZ, '
+      'acc=$accX/$accY/$accZ mg, '
       'mag=$magMg mg, peak=$peakMg mg, score=$impactScore, '
       'batt=$batteryPct, state=${state.name}, $flags)';
 
@@ -446,9 +409,6 @@ class TelemetryRecord {
           other.accX == accX &&
           other.accY == accY &&
           other.accZ == accZ &&
-          other.gyrX == gyrX &&
-          other.gyrY == gyrY &&
-          other.gyrZ == gyrZ &&
           other.magMg == magMg &&
           other.peakMg == peakMg &&
           other.flags == flags &&
@@ -462,9 +422,6 @@ class TelemetryRecord {
         accX,
         accY,
         accZ,
-        gyrX,
-        gyrY,
-        gyrZ,
         magMg,
         peakMg,
         flags,
@@ -475,7 +432,11 @@ class TelemetryRecord {
 }
 
 /// Size of a telemetry record in bytes (§5). Fixed, not negotiated.
-const int telemetryRecordBytes = 24;
+///
+/// 18 in protocol v2. v1 was 24 and included three gyroscope axes; the node
+/// moved to an ADXL345, which has no gyroscope, so those six bytes were
+/// removed rather than zero-filled.
+const int telemetryRecordBytes = 18;
 
 /// One row of a `CALIB_LOG` array (§6.8).
 ///
@@ -490,9 +451,6 @@ class CalibrationSample {
     required this.accX,
     required this.accY,
     required this.accZ,
-    required this.gyrX,
-    required this.gyrY,
-    required this.gyrZ,
     required this.sw420,
   });
 
@@ -508,15 +466,6 @@ class CalibrationSample {
   /// Accelerometer Z in milli-g.
   final int accZ;
 
-  /// Gyroscope X in tenths of a degree per second.
-  final int gyrX;
-
-  /// Gyroscope Y in tenths of a degree per second.
-  final int gyrY;
-
-  /// Gyroscope Z in tenths of a degree per second.
-  final int gyrZ;
-
   /// SW-420 output during this sample.
   final bool sw420;
 
@@ -531,7 +480,7 @@ class CalibrationSample {
 
   @override
   String toString() => 'CalibrationSample(t=${tMs}ms, '
-      'acc=$accX/$accY/$accZ, gyr=$gyrX/$gyrY/$gyrZ, sw420=$sw420)';
+      'acc=$accX/$accY/$accZ, sw420=$sw420)';
 
   @override
   bool operator ==(Object other) =>
@@ -541,12 +490,8 @@ class CalibrationSample {
           other.accX == accX &&
           other.accY == accY &&
           other.accZ == accZ &&
-          other.gyrX == gyrX &&
-          other.gyrY == gyrY &&
-          other.gyrZ == gyrZ &&
           other.sw420 == sw420;
 
   @override
-  int get hashCode =>
-      Object.hash(tMs, accX, accY, accZ, gyrX, gyrY, gyrZ, sw420);
+  int get hashCode => Object.hash(tMs, accX, accY, accZ, sw420);
 }

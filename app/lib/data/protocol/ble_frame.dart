@@ -50,8 +50,13 @@ const int kSof0 = 0xA5;
 /// `SOF1` (§3).
 const int kSof1 = 0x5A;
 
-/// Protocol version this app speaks (§3 `VER = 0x01`).
-const int kProtocolVersion = 0x01;
+/// Protocol version this app speaks (§3 `VER = 0x02`).
+///
+/// v2 is the ADXL345 telemetry layout: 18 bytes with no gyroscope axes. v1
+/// carried three gyro axes in a 24-byte record for the MPU6050 the node used to
+/// have. The scanner rejects any version it does not implement, so a v1 app and
+/// a v2 node fail loudly at the first frame instead of misreading one.
+const int kProtocolVersion = 0x02;
 
 /// `SOF0 SOF1 VER TYPE LEN_LO LEN_HI` (§3).
 const int kHeaderBytes = 6;
@@ -167,7 +172,7 @@ enum MessageType {
   /// `0x09` device → phone. The one event envelope (§4, §6.6).
   event(0x09, BleChannel.ctrl),
 
-  /// `0x10` device → phone. 24-byte binary record on `TX` (§5).
+  /// `0x10` device → phone. 18-byte binary record on `TX` (§5).
   telemetry(0x10, BleChannel.tx),
 
   /// `0x11` device → phone.

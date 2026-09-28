@@ -58,7 +58,7 @@ final class PairedDevice {
     this.isCalibrated = false,
     this.hasVibrationSensor = false,
     this.hasOled = false,
-    this.whoAmIName,
+    this.sensorName,
     this.linkState = DeviceLinkState.disconnected,
   });
 
@@ -134,8 +134,8 @@ final class PairedDevice {
   /// Whether an SSD1306 answered.
   final bool hasOled;
 
-  /// The identified IMU part, e.g. `MPU-6050/MPU-6500`, when recognised.
-  final String? whoAmIName;
+  /// The fitted accelerometer part, e.g. `ADXL345`, when the node reported it.
+  final String? sensorName;
 
   /// The current link state.
   final DeviceLinkState linkState;
@@ -188,7 +188,7 @@ final class PairedDevice {
     bool? isCalibrated,
     bool? hasVibrationSensor,
     bool? hasOled,
-    String? whoAmIName,
+    String? sensorName,
     DeviceLinkState? linkState,
   }) =>
       PairedDevice(
@@ -210,7 +210,7 @@ final class PairedDevice {
         isCalibrated: isCalibrated ?? this.isCalibrated,
         hasVibrationSensor: hasVibrationSensor ?? this.hasVibrationSensor,
         hasOled: hasOled ?? this.hasOled,
-        whoAmIName: whoAmIName ?? this.whoAmIName,
+        sensorName: sensorName ?? this.sensorName,
         linkState: linkState ?? this.linkState,
       );
 
@@ -248,7 +248,7 @@ final class PairedDevice {
           other.isCalibrated == isCalibrated &&
           other.hasVibrationSensor == hasVibrationSensor &&
           other.hasOled == hasOled &&
-          other.whoAmIName == whoAmIName &&
+          other.sensorName == sensorName &&
           other.linkState == linkState;
 
   @override
@@ -271,7 +271,7 @@ final class PairedDevice {
         isCalibrated,
         hasVibrationSensor,
         hasOled,
-        whoAmIName,
+        sensorName,
         linkState,
       );
 

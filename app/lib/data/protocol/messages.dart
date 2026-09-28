@@ -313,7 +313,6 @@ final class ConfigMessage extends DeviceMessage {
     return ConfigMessage(
       ConfigPatch(
         accelThresholdMg: r.integerOrNull('accelThresholdMg'),
-        gyroThresholdDps: r.numberOrNull('gyroThresholdDps'),
         vibrationRequired: r.booleanOrNull('vibrationRequired'),
         debounceMs: r.integerOrNull('debounceMs'),
         confirmWindowSec: r.integerOrNull('confirmWindowSec'),
@@ -789,8 +788,6 @@ final class ImpactSummary {
   const ImpactSummary({
     required this.magG,
     required this.peakAccMg,
-    required this.peakGyrDps,
-    required this.gyrMagDps,
     required this.sw420,
     this.orientationChangeDeg,
     this.preImpactSpeedKmh,
@@ -804,8 +801,6 @@ final class ImpactSummary {
   factory ImpactSummary.fromReader(JsonReader r) => ImpactSummary(
         magG: r.number('magG'),
         peakAccMg: r.integer('peakAccMg'),
-        peakGyrDps: r.integer('peakGyrDps'),
-        gyrMagDps: r.number('gyrMagDps'),
         sw420: r.boolean('sw420'),
         orientationChangeDeg: r.numberOrNull('orientationChangeDeg'),
         preImpactSpeedKmh: r.numberOrNull('preImpactSpeedKmh'),
@@ -819,17 +814,10 @@ final class ImpactSummary {
   /// An `int`, not a `double`, and that is not laziness: the golden vector
   /// carries `4820`, not `4820.0`, so a `double` here re-encodes to different
   /// bytes and fails golden conformance. The split is coherent rather than
-  /// arbitrary — `magG` and `gyrMagDps` are computed magnitudes and genuinely
-  /// fractional, while `peakAccMg` and `peakGyrDps` are whole units that happen
-  /// to be small. The wire types are honoured instead of smoothed over.
+  /// arbitrary — `magG` is a computed magnitude and genuinely fractional, while
+  /// `peakAccMg` is a whole number of milli-g. The wire types are honoured
+  /// instead of smoothed over.
   final int peakAccMg;
-
-  /// Peak gyroscope rate in degrees per second, whole degrees. See [peakAccMg]
-  /// for why this is an `int`.
-  final int peakGyrDps;
-
-  /// Combined gyroscope magnitude in degrees per second.
-  final double gyrMagDps;
 
   /// Whether the SW-420 vibration sensor also fired.
   final bool sw420;
@@ -845,8 +833,6 @@ final class ImpactSummary {
   Map<String, Object?> toJson() => <String, Object?>{
         'magG': magG,
         'peakAccMg': peakAccMg,
-        'peakGyrDps': peakGyrDps,
-        'gyrMagDps': gyrMagDps,
         'sw420': sw420,
         if (orientationChangeDeg != null)
           'orientationChangeDeg': orientationChangeDeg,
@@ -864,7 +850,6 @@ final class StatusMessage extends DeviceMessage {
     this.stateName,
     this.effectiveConfig,
     this.peakMagMg,
-    this.peakGyrDps,
     this.sw420,
     this.sw420Hits,
     this.score,
@@ -889,7 +874,6 @@ final class StatusMessage extends DeviceMessage {
       uptimeMs: r.integer('uptimeMs'),
       effectiveConfig: config == null ? null : ConfigPatch.fromReader(config),
       peakMagMg: r.numberOrNull('peakMagMg'),
-      peakGyrDps: r.numberOrNull('peakGyrDps'),
       sw420: r.booleanOrNull('sw420'),
       sw420Hits: r.integerOrNull('sw420Hits'),
       score: r.integerOrNull('score'),
@@ -921,9 +905,6 @@ final class StatusMessage extends DeviceMessage {
 
   /// Peak accelerometer magnitude held since reset, milli-g.
   final double? peakMagMg;
-
-  /// Peak gyroscope rate held since reset, °/s.
-  final double? peakGyrDps;
 
   /// Whether the SW-420 output is currently high.
   final bool? sw420;
@@ -959,7 +940,6 @@ final class StatusMessage extends DeviceMessage {
         if (effectiveConfig != null)
           'effectiveConfig': effectiveConfig!.toJson(),
         if (peakMagMg != null) 'peakMagMg': peakMagMg,
-        if (peakGyrDps != null) 'peakGyrDps': peakGyrDps,
         if (sw420 != null) 'sw420': sw420,
         if (sw420Hits != null) 'sw420Hits': sw420Hits,
         if (score != null) 'score': score,
@@ -971,75 +951,75 @@ final class StatusMessage extends DeviceMessage {
 }
 
 /// The `mpu` object of a [HelloAckMessage] (§6.2).
-final class MpuInfo {
-  /// Creates MPU6050 presence info.
-  const MpuInfo({
+/// The `sensor` object of a [HelloAckMessage] (§6.2).
+///
+/// This replaced an `mpu` object that described an MPU6050 with a `whoAmI`
+/// identity byte and a nine-entry table of the usual 6-axis IMUs. The node now
+/// carries an ADXL345, which is an accelerometer only, so there is no `WHO_AM_I`
+/// and no family of interchangeable parts to recognise: `DEVID` is `0xE5` or the
+/// part is simply not there. The table went with it rather than being kept as an
+/// empty list of things this build cannot use.
+final class SensorInfo {
+  /// Creates accelerometer presence info.
+  const SensorInfo({
     required this.present,
+    this.part,
     this.addr,
-    this.whoAmI,
+    this.deviceId,
   });
 
-  /// Decodes an `mpu` object.
-  factory MpuInfo.fromJson(Map<String, Object?> json) {
+  /// Decodes a `sensor` object.
+  factory SensorInfo.fromJson(Map<String, Object?> json) {
     final JsonReader r = JsonReader(json);
-    return MpuInfo(
+    return SensorInfo(
       present: r.boolean('present'),
+      part: r.stringOrNull('part'),
       addr: r.stringOrNull('addr'),
-      whoAmI: r.integerOrNull('whoAmI'),
+      deviceId: r.integerOrNull('deviceId'),
     );
   }
 
-  /// Whether an MPU6050 answered on I²C. `false` is a supported state, not an
-  /// error: the app shows a "sensor not connected" panel and keeps working.
+  /// Whether the accelerometer answered on I²C. `false` is a supported state,
+  /// not an error: the app shows a "sensor not connected" panel and keeps
+  /// working.
   final bool present;
 
-  /// I²C address, e.g. `0x68`.
+  /// The fitted part, e.g. `ADXL345`.
+  ///
+  /// Informational. The firmware only ever speaks to one part, so this is a
+  /// label to show a technician, not something to branch on.
+  final String? part;
+
+  /// I²C address, e.g. `0x53`.
+  ///
+  /// Two ADXL345s cannot share a bus with an SSD1306 at `0x53`/`0x1D`/`0x3C`, so
+  /// this is a wiring check: an address here that is not the documented one means
+  /// SDO is strapped differently, which the firmware handles but which is worth
+  /// seeing in DIAG.
   final String? addr;
 
-  /// The `WHO_AM_I` register, or `null` when the read failed.
-  ///
-  /// This is an identity byte, not a boolean, and pinning it to one part is how
-  /// you end up rejecting a perfectly good node: `0x68` is an MPU-6050/6500, but
-  /// `0x70` is an MPU-6500, `0x71` an MPU-9250/9255, `0x12` an ICM-20670/20602,
-  /// and every one of those drives the node fine. §6.2's own example pairs
-  /// `addr: "0x68"` with `whoAmI: 113` (`0x71`), so the spec itself is not
-  /// internally consistent about which part it means. Use [isKnownImu] and
-  /// [whoAmIName] instead of comparing against a single constant.
-  final int? whoAmI;
+  /// The ADXL345 `DEVID` register: `0xE5` (229) when the part answered, `null`
+  /// when the read failed.
+  final int? deviceId;
 
-  /// The recognised part for [whoAmI], or `null` when it is not in the table.
-  String? get whoAmIName => whoAmI == null ? null : imuNames[whoAmI];
-
-  /// Whether [whoAmI] matches a part this app knows how to talk to.
+  /// Whether [deviceId] is the value an ADXL345 returns.
   ///
-  /// A `false` here is diagnostic, not fatal: the protocol is identical for all
-  /// of these parts, and calibration is generic, so an unrecognised part still
-  /// works. It just means the bus may be miswired and the value is worth
-  /// showing in DIAG. Note this is deliberately *not* folded into
-  /// [HelloAckMessage.fullyEquipped], which is about missing hardware.
-  bool get isKnownImu => whoAmI != null && imuNames.containsKey(whoAmI);
+  /// Diagnostic only. A mismatch means something other than an accelerometer is
+  /// answering at this address, and the firmware refuses to read it rather than
+  /// reporting noise as motion — so the app should say the node is faulty rather
+  /// than continue as if calibration were merely pending.
+  bool get isExpectedPart => deviceId == expectedDeviceId;
 
-  /// Known `WHO_AM_I` values, by part.
-  ///
-  /// The usual identity bytes of the 6-axis IMUs an ESP32 crash-logic node is
-  /// built with. A `null` name means "responded, but not a part we recognise".
-  static const Map<int, String> imuNames = <int, String>{
-    0x12: 'ICM-20670/ICM-20602',
-    0x19: 'ICM-20649',
-    0x24: 'BMI270',
-    0x67: 'ICM-42670',
-    0x68: 'MPU-6050/MPU-6500',
-    0x6B: 'LSM6DSO/LSM6DS3',
-    0x70: 'MPU-6500/ICM-20948',
-    0x71: 'MPU-9250/MPU-9255',
-    0xA0: 'ICM-42688/ICM-42688-P',
-  };
+  /// The ADXL345's `DEVID`. A single well-known value, unlike the MPU6050 family
+  /// this replaced, which had a dozen.
+  static const int expectedDeviceId = 0xE5;
 
   /// The §6.2 object form.
   Map<String, Object?> toJson() => <String, Object?>{
         'present': present,
+        if (part != null) 'part': part,
         if (addr != null) 'addr': addr,
-        if (whoAmI != null) 'whoAmI': whoAmI,
+        if (deviceId != null) 'deviceId': deviceId,
       };
 }
 
@@ -1086,7 +1066,7 @@ final class HelloAckMessage extends DeviceMessage {
     required this.uptimeMs,
     required this.sensorRateHz,
     required this.state,
-    this.mpu,
+    this.sensor,
     this.oled,
     this.sw420,
     this.calibrated,
@@ -1096,7 +1076,7 @@ final class HelloAckMessage extends DeviceMessage {
   /// Decodes a `HELLO_ACK` payload.
   factory HelloAckMessage.fromJson(Map<String, Object?> json) {
     final JsonReader r = JsonReader(json);
-    final JsonReader? mpu = r.objectOrNull('mpu');
+    final JsonReader? sensor = r.objectOrNull('sensor');
     final JsonReader? oled = r.objectOrNull('oled');
     return HelloAckMessage(
       fwVersion: r.string('fwVersion'),
@@ -1111,7 +1091,7 @@ final class HelloAckMessage extends DeviceMessage {
       uptimeMs: r.integer('uptimeMs'),
       sensorRateHz: r.integer('sensorRateHz'),
       state: DeviceState.fromByte(r.integer('state')),
-      mpu: mpu == null ? null : MpuInfo.fromJson(mpu.json),
+      sensor: sensor == null ? null : SensorInfo.fromJson(sensor.json),
       oled: oled == null ? null : OledInfo.fromJson(oled.json),
       sw420: r.booleanOrNull('sw420'),
       calibrated: r.booleanOrNull('calibrated'),
@@ -1160,8 +1140,8 @@ final class HelloAckMessage extends DeviceMessage {
   /// Its name, for logs.
   final String? stateName;
 
-  /// MPU6050 presence and identity.
-  final MpuInfo? mpu;
+  /// Accelerometer presence and identity.
+  final SensorInfo? sensor;
 
   /// SSD1306 presence.
   final OledInfo? oled;
@@ -1178,7 +1158,7 @@ final class HelloAckMessage extends DeviceMessage {
   /// The app renders the degraded state rather than erroring (§6.2): a user who
   /// never wired the OLED still gets a working app.
   bool get fullyEquipped =>
-      (mpu?.present ?? false) && (oled?.present ?? true) && (sw420 ?? false);
+      (sensor?.present ?? false) && (oled?.present ?? true) && (sw420 ?? false);
 
   @override
   MessageType get type => MessageType.helloAck;
@@ -1195,7 +1175,7 @@ final class HelloAckMessage extends DeviceMessage {
         'batteryPct': batteryPct,
         'charging': charging,
         'uptimeMs': uptimeMs,
-        if (mpu != null) 'mpu': mpu!.toJson(),
+        if (sensor != null) 'sensor': sensor!.toJson(),
         if (oled != null) 'oled': oled!.toJson(),
         if (sw420 != null) 'sw420': sw420,
         if (calibrated != null) 'calibrated': calibrated,
@@ -1264,9 +1244,6 @@ final class CalibLogMessage extends DeviceMessage {
         accX: r.integer('acc_x'),
         accY: r.integer('acc_y'),
         accZ: r.integer('acc_z'),
-        gyrX: r.integer('gyr_x'),
-        gyrY: r.integer('gyr_y'),
-        gyrZ: r.integer('gyr_z'),
         sw420: r.booleanOrNull('sw420') ?? false,
       );
 
@@ -1285,9 +1262,6 @@ final class CalibLogMessage extends DeviceMessage {
               'acc_x': s.accX,
               'acc_y': s.accY,
               'acc_z': s.accZ,
-              'gyr_x': s.gyrX,
-              'gyr_y': s.gyrY,
-              'gyr_z': s.gyrZ,
               'sw420': s.sw420,
             },
         ],
@@ -1308,7 +1282,7 @@ final class DiagMessage extends DeviceMessage {
     this.droppedFrames,
     this.crcErrors,
     this.bleClients,
-    this.mpuI2cErrors,
+    this.sensorI2cErrors,
     this.oledOk,
     this.brownoutCount,
     this.watchdogResets,
@@ -1330,7 +1304,7 @@ final class DiagMessage extends DeviceMessage {
       droppedFrames: r.integerOrNull('droppedFrames'),
       crcErrors: r.integerOrNull('crcErrors'),
       bleClients: r.integerOrNull('bleClients'),
-      mpuI2cErrors: r.integerOrNull('mpuI2cErrors'),
+      sensorI2cErrors: r.integerOrNull('sensorI2cErrors'),
       oledOk: r.booleanOrNull('oledOk'),
       brownoutCount: r.integerOrNull('brownoutCount'),
       watchdogResets: r.integerOrNull('watchdogResets'),
@@ -1370,8 +1344,8 @@ final class DiagMessage extends DeviceMessage {
   /// Connected central count.
   final int? bleClients;
 
-  /// I²C errors talking to the MPU6050.
-  final int? mpuI2cErrors;
+  /// I²C errors talking to the accelerometer.
+  final int? sensorI2cErrors;
 
   /// Whether the OLED responded to the last probe.
   final bool? oledOk;
@@ -1395,7 +1369,7 @@ final class DiagMessage extends DeviceMessage {
   List<String> get faults => <String>[
         if ((watchdogResets ?? 0) > 0) 'watchdog reset x$watchdogResets',
         if ((brownoutCount ?? 0) > 0) 'brownout x$brownoutCount',
-        if ((mpuI2cErrors ?? 0) > 0) 'MPU I2C errors x$mpuI2cErrors',
+        if ((sensorI2cErrors ?? 0) > 0) 'Sensor I2C errors x$sensorI2cErrors',
         if (oledOk == false) 'OLED not responding',
         if ((crcErrors ?? 0) > 0) 'device saw $crcErrors CRC errors',
         if ((droppedFrames ?? 0) > 0) '$droppedFrames telemetry frames dropped',
@@ -1417,7 +1391,7 @@ final class DiagMessage extends DeviceMessage {
         if (droppedFrames != null) 'droppedFrames': droppedFrames,
         if (crcErrors != null) 'crcErrors': crcErrors,
         if (bleClients != null) 'bleClients': bleClients,
-        if (mpuI2cErrors != null) 'mpuI2cErrors': mpuI2cErrors,
+        if (sensorI2cErrors != null) 'sensorI2cErrors': sensorI2cErrors,
         if (oledOk != null) 'oledOk': oledOk,
         if (brownoutCount != null) 'brownoutCount': brownoutCount,
         if (watchdogResets != null) 'watchdogResets': watchdogResets,
@@ -1498,7 +1472,6 @@ final class ConfigPatch {
   /// Creates a patch. Every field defaults to "not mentioned".
   const ConfigPatch({
     this.accelThresholdMg,
-    this.gyroThresholdDps,
     this.vibrationRequired,
     this.debounceMs,
     this.confirmWindowSec,
@@ -1518,7 +1491,6 @@ final class ConfigPatch {
   /// Decodes a `CONFIG`/`effectiveConfig` object from an existing [JsonReader].
   factory ConfigPatch.fromReader(JsonReader r) => ConfigPatch(
         accelThresholdMg: r.integerOrNull('accelThresholdMg'),
-        gyroThresholdDps: r.numberOrNull('gyroThresholdDps'),
         vibrationRequired: r.booleanOrNull('vibrationRequired'),
         debounceMs: r.integerOrNull('debounceMs'),
         confirmWindowSec: r.integerOrNull('confirmWindowSec'),
@@ -1534,8 +1506,12 @@ final class ConfigPatch {
   /// Accelerometer trip threshold, milli-g. §6.4 accepts 1500…8000.
   final int? accelThresholdMg;
 
-  /// Gyroscope trip threshold, °/s. Accepts 80…800.
-  final double? gyroThresholdDps;
+  /// ~~Gyroscope trip threshold~~ — removed in protocol v2.
+  ///
+  /// There is no gyroscope to threshold: the node's ADXL345 measures
+  /// acceleration only. The key is gone from the wire format rather than ignored
+  /// on arrival, so a stale client that still sends it is not silently accepted
+  /// as though its setting took effect.
 
   /// Whether the SW-420 must also trip. Defaults to `true`.
   final bool? vibrationRequired;
@@ -1571,7 +1547,6 @@ final class ConfigPatch {
   /// Whether this patch would change anything.
   bool get isEmpty =>
       accelThresholdMg == null &&
-      gyroThresholdDps == null &&
       vibrationRequired == null &&
       debounceMs == null &&
       confirmWindowSec == null &&
@@ -1589,7 +1564,6 @@ final class ConfigPatch {
   /// tests to assert that absent keys really are absent.
   List<String> get changedKeys => <String>[
         if (accelThresholdMg != null) 'accelThresholdMg',
-        if (gyroThresholdDps != null) 'gyroThresholdDps',
         if (vibrationRequired != null) 'vibrationRequired',
         if (debounceMs != null) 'debounceMs',
         if (confirmWindowSec != null) 'confirmWindowSec',
@@ -1605,7 +1579,6 @@ final class ConfigPatch {
   /// The §6.4 object form, omitting keys that were not set.
   Map<String, Object?> toJson() => <String, Object?>{
         if (accelThresholdMg != null) 'accelThresholdMg': accelThresholdMg,
-        if (gyroThresholdDps != null) 'gyroThresholdDps': gyroThresholdDps,
         if (vibrationRequired != null) 'vibrationRequired': vibrationRequired,
         if (debounceMs != null) 'debounceMs': debounceMs,
         if (confirmWindowSec != null) 'confirmWindowSec': confirmWindowSec,
@@ -1621,7 +1594,6 @@ final class ConfigPatch {
   /// Overlays this patch onto [base], leaving unset keys alone (§6.4).
   ConfigPatch mergedOnto(ConfigPatch base) => ConfigPatch(
         accelThresholdMg: accelThresholdMg ?? base.accelThresholdMg,
-        gyroThresholdDps: gyroThresholdDps ?? base.gyroThresholdDps,
         vibrationRequired: vibrationRequired ?? base.vibrationRequired,
         debounceMs: debounceMs ?? base.debounceMs,
         confirmWindowSec: confirmWindowSec ?? base.confirmWindowSec,
@@ -1650,7 +1622,6 @@ final class DeviceConfig {
   /// caller believe an out-of-range value had been accepted.
   DeviceConfig({
     required int accelThresholdMg,
-    required double gyroThresholdDps,
     required this.vibrationRequired,
     required int debounceMs,
     required int confirmWindowSec,
@@ -1661,8 +1632,7 @@ final class DeviceConfig {
     required this.ledEnabled,
     required int muteUntil,
     required this.autoArm,
-  })  : accelThresholdMg = _clampInt(accelThresholdMg, 1500, 8000),
-        gyroThresholdDps = _clampDouble(gyroThresholdDps, 80, 800),
+  })  : accelThresholdMg = _clampInt(accelThresholdMg, 1500, 16000),
         debounceMs = _clampInt(debounceMs, 20, 500),
         confirmWindowSec = _clampInt(confirmWindowSec, 5, 120),
         minSpeedKmh = _clampDouble(minSpeedKmh, 0, 60),
@@ -1673,7 +1643,6 @@ final class DeviceConfig {
   /// The §6.4 defaults.
   factory DeviceConfig.defaults() => DeviceConfig(
         accelThresholdMg: 3000,
-        gyroThresholdDps: 220,
         vibrationRequired: true,
         debounceMs: 60,
         confirmWindowSec: 10,
@@ -1692,7 +1661,6 @@ final class DeviceConfig {
     final ConfigPatch merged = patch.mergedOnto(base.toPatch());
     return DeviceConfig(
       accelThresholdMg: merged.accelThresholdMg ?? 3000,
-      gyroThresholdDps: merged.gyroThresholdDps ?? 220,
       vibrationRequired: merged.vibrationRequired ?? true,
       debounceMs: merged.debounceMs ?? 60,
       confirmWindowSec: merged.confirmWindowSec ?? 10,
@@ -1706,11 +1674,12 @@ final class DeviceConfig {
     );
   }
 
-  /// Accelerometer trip threshold, milli-g. §6.4: 1500…8000, default 3000.
+  /// Accelerometer trip threshold, milli-g. §6.4: 1500…16000, default 3000.
+  ///
+  /// The upper bound rose from 8000 with the ADXL345, which is configured for
+  /// ±16 g. The old ceiling sat exactly at full scale of the old part's ±8 g
+  /// range, so anything above it was not a number the node could ever act on.
   final int accelThresholdMg;
-
-  /// Gyroscope trip threshold, °/s. §6.4: 80…800, default 220.
-  final double gyroThresholdDps;
 
   /// Whether the SW-420 must also trip.
   final bool vibrationRequired;
@@ -1746,7 +1715,6 @@ final class DeviceConfig {
   /// [StatusMessage.effectiveConfig].
   ConfigPatch toPatch() => ConfigPatch(
         accelThresholdMg: accelThresholdMg,
-        gyroThresholdDps: gyroThresholdDps,
         vibrationRequired: vibrationRequired,
         debounceMs: debounceMs,
         confirmWindowSec: confirmWindowSec,
@@ -1776,7 +1744,6 @@ final class DeviceConfig {
   static List<String> clampedFields(
     ConfigPatch requested, {
     required int accelThresholdMg,
-    required double gyroThresholdDps,
     required int debounceMs,
     required int confirmWindowSec,
     required double minSpeedKmh,
@@ -1787,9 +1754,6 @@ final class DeviceConfig {
         if (requested.accelThresholdMg != null &&
             requested.accelThresholdMg != accelThresholdMg)
           'accelThresholdMg',
-        if (requested.gyroThresholdDps != null &&
-            requested.gyroThresholdDps != gyroThresholdDps)
-          'gyroThresholdDps',
         if (requested.debounceMs != null && requested.debounceMs != debounceMs)
           'debounceMs',
         if (requested.confirmWindowSec != null &&
@@ -1807,8 +1771,7 @@ final class DeviceConfig {
       ];
 
   @override
-  String toString() =>
-      'DeviceConfig(accel=${accelThresholdMg}mg, gyro=${gyroThresholdDps}dps, '
+  String toString() => 'DeviceConfig(accel=${accelThresholdMg}mg, '
       'debounce=${debounceMs}ms, window=${confirmWindowSec}s, '
       'minSpeed=$minSpeedKmh km/h, gain=$detectorGain, hz=$telemetryHz)';
 }
