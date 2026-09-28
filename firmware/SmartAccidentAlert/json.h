@@ -162,9 +162,9 @@ struct HelloAckView {
   uint8_t batteryPct;  ///< 255 = unknown
   bool charging;
   uint32_t uptimeMs;
-  bool mpuPresent;
-  const char* mpuAddr;  ///< "0x68"
-  int whoAmI;           ///< -1 when absent
+  bool accelPresent;
+  const char* accelAddr;  ///< e.g. "0x53"
+  int deviceId;        ///< ADXL345 DEVID; -1 when absent
   bool oledPresent;
   const char* oledAddr;  ///< "0x3C"
   bool sw420;
@@ -186,7 +186,6 @@ size_t buildDeviceInfo(char* out, size_t cap, const DeviceInfoView& v);
 
 struct EffectiveConfigView {
   uint16_t accelThresholdMg;
-  uint16_t gyroThresholdDps10;
   bool vibrationRequired;
   uint16_t debounceMs;
   uint16_t confirmWindowSec;
@@ -206,7 +205,6 @@ struct StatusView {
   uint32_t sinceMs;
   EffectiveConfigView cfg;
   uint16_t peakMagMg;
-  uint16_t peakGyrDps;  ///< integer deg/s
   bool sw420;
   uint16_t sw420Hits;
   uint8_t score;
@@ -222,8 +220,6 @@ size_t buildStatus(char* out, size_t cap, const StatusView& v);
 struct ImpactView {
   uint16_t magMg;             ///< used for magG (milli-g -> 2 decimals)
   uint16_t peakAccMg;
-  uint16_t peakGyrDps;        ///< integer deg/s
-  uint16_t gyrMagDps10;       ///< 0.1 deg/s -> 1 decimal
   bool sw420;
   uint16_t orientDeg10;       ///< 0.1 degrees -> 1 decimal
   uint16_t speedMilliKmh;     ///< 0.001 km/h -> 1 decimal
@@ -246,7 +242,6 @@ size_t buildEvent(char* out, size_t cap, const EventView& v);
 struct CalibSampleView {
   uint32_t tMs;
   int16_t accX, accY, accZ;
-  int16_t gyrX, gyrY, gyrZ;
   bool sw420;
 };
 
@@ -268,7 +263,7 @@ struct DiagView {
   uint32_t droppedFrames;
   uint32_t crcErrors;
   uint8_t bleClients;
-  uint32_t mpuI2cErrors;
+  uint32_t accelI2cErrors;
   bool oledOk;
   uint32_t brownoutCount;
   uint32_t watchdogResets;

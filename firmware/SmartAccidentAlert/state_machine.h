@@ -51,7 +51,6 @@ constexpr uint8_t kEvNone = 0xFF;
 /// there is one place to look; the CONFIG message may move any of them.
 struct Settings {
   uint16_t accelThresholdMg = kCfgAccelThresholdMgDefault;
-  uint16_t gyroThresholdDps10 = kCfgGyroThresholdDpsDefault;
   uint16_t debounceMs = kCfgDebounceMsDefault;
   uint16_t confirmWindowSec = kCfgConfirmWindowSecDefault;
   uint32_t muteUntilUnixS = kCfgMuteUntilDefault;

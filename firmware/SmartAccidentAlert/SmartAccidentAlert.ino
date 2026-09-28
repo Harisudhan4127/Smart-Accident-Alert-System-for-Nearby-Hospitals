@@ -3,7 +3,7 @@
 // Six tasks across two cores, per docs/02-ble-protocol.md §9 and
 // PROJECT_PLAN.md §8. The shape of the firmware is deliberately boring:
 //
-//   core 1   sensorTask  blocking I2C burst read of the MPU6050
+//   core 1   sensorTask  blocking I2C read of the ADXL345
 //            detectTask  filter, fuse, score
 //   core 0   bleTask    pack telemetry, drive the event sequencer
 //            uiTask     OLED on change, LEDs, buzzer, button
@@ -44,7 +44,7 @@ namespace {
 // so the diagnostics display showed a task that had been replaced.
 enum WdTask : uint8_t { kWdSensor = 0, kWdDetect, kWdBle, kWdUi, kWdSys, kWdWatchdog, kWdCount };
 
-saas::Mpu6050 g_mpu;
+saas::Adxl345 g_accel;
 saas::SensorPipeline g_pipeline;
 saas::Detector g_detector;
 saas::StateMachine g_sm;
@@ -64,7 +64,7 @@ volatile uint8_t g_telemHead = 0, g_telemTail = 0;
 /// Guarded by g_stateLock.
 portMUX_TYPE g_stateLock = portMUX_INITIALIZER_UNLOCKED;
 bool g_sensorFault = false;
-uint32_t g_mpuI2cErrors = 0;
+uint32_t g_accelI2cErrors = 0;
 uint32_t g_crcErrors = 0;
 uint32_t g_loopOverage = 0;
 uint32_t g_stateSinceMs = 0;
@@ -198,7 +198,6 @@ static size_t buildStatusDoc(char* out, size_t cap, void*) {
   v.sinceMs = millis() - g_stateSinceMs;
   const saas::Settings& s = g_sm.settings();
   v.cfg.accelThresholdMg = s.accelThresholdMg;
-  v.cfg.gyroThresholdDps10 = s.gyroThresholdDps10;
   v.cfg.vibrationRequired = s.vibrationRequired;
   v.cfg.debounceMs = s.debounceMs;
   v.cfg.confirmWindowSec = s.confirmWindowSec;
@@ -210,7 +209,6 @@ static size_t buildStatusDoc(char* out, size_t cap, void*) {
   v.cfg.muteUntil = s.muteUntilUnixS;
   v.cfg.autoArm = s.autoArm;
   v.peakMagMg = g_detector.peakAccMg();
-  v.peakGyrDps = g_detector.peakGyrDps();
   v.sw420 = g_pipeline.sw420Level();
   v.sw420Hits = g_pipeline.sw420Edges();
   v.score = g_detector.lastScore();
@@ -247,7 +245,7 @@ static size_t buildDiagDoc(char* out, size_t cap, void*) {
   v.batteryMv = batteryMilliVolts(g_batteryAdc());
   v.rssi = Comm::instance().rssi();
   portENTER_CRITICAL(&g_stateLock);
-  v.mpuI2cErrors = g_mpuI2cErrors;
+  v.accelI2cErrors = g_accel.errorCount();
   v.stackHighWater = uxTaskGetStackHighWaterMark(nullptr);
   v.loopHz = kSensorHz;
   v.cpuLoadPct = 0;
@@ -296,8 +294,6 @@ static void queueEvent(uint8_t type, const saas::Decision& d, uint8_t score) {
   v.score = score;
   v.impact.magMg = d.magMg;
   v.impact.peakAccMg = d.peakAccMg;
-  v.impact.peakGyrDps = d.peakGyrDps;
-  v.impact.gyrMagDps10 = d.gyrMagDps10;
   v.impact.sw420 = d.sw420 != 0;
   v.impact.orientDeg10 = d.orientDeg10;
   v.impact.speedMilliKmh = static_cast<uint16_t>(d.speedMilliKmh > 0xFFFF ? 0xFFFF : d.speedMilliKmh);
@@ -442,9 +438,6 @@ static void applyConfig(json::Parser& p) {
   ranged("accelThresholdMg", kCfgAccelThresholdMgMin, kCfgAccelThresholdMgMax, tmp);
   if (tmp) s.accelThresholdMg = static_cast<uint16_t>(tmp);
   tmp = 0;
-  ranged("gyroThresholdDps", kCfgGyroThresholdDps10Min / 10, kCfgGyroThresholdDps10Max / 10, tmp);
-  if (tmp) s.gyroThresholdDps10 = static_cast<uint16_t>(tmp * 10);
-  tmp = 0;
   ranged("confirmWindowSec", kCfgConfirmWindowSecMin, kCfgConfirmWindowSecMax, tmp);
   if (tmp) s.confirmWindowSec = static_cast<uint16_t>(tmp);
   tmp = 0;
@@ -502,7 +495,6 @@ static void applyConfig(json::Parser& p) {
   // document cannot leave Settings and DetectorCfg disagreeing.
   DetectorCfg dc = g_detector.config();
   dc.accelThresholdMg = s.accelThresholdMg;
-  dc.gyroThresholdDps10 = s.gyroThresholdDps10;
   dc.vibrationRequired = s.vibrationRequired;
   dc.debounceMs = s.debounceMs;
   dc.minSpeedMilliKmh = s.minSpeedMilliKmh;
@@ -538,9 +530,11 @@ static void handleParsedRequest(uint8_t type, json::Parser& p, const char* doc, 
       hv.batteryPct = hv.batteryMv ? batteryPercent(hv.batteryMv) : 255;
       hv.charging = g_charging();
       hv.uptimeMs = now;
-      hv.mpuPresent = g_mpu.present();
-      hv.mpuAddr = "0x68";
-      hv.whoAmI = g_mpu.present() ? g_mpu.whoAmI() : -1;
+      hv.accelPresent = g_accel.present();
+      static char addrBuf[8];
+      snprintf(addrBuf, sizeof(addrBuf), "0x%02X", g_accel.address());
+      hv.accelAddr = addrBuf;
+      hv.deviceId = g_accel.present() ? static_cast<int>(g_accel.deviceId()) : -1;
       hv.oledPresent = Ui::instance().oledOk();
       hv.oledAddr = "0x3C";
       hv.sw420 = g_pipeline.sw420Level();
@@ -687,16 +681,9 @@ static void sensorTask(void*) {
   TickType_t last = xTaskGetTickCount();
   for (;;) {
     RawSample raw{};
-    int16_t ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
-    raw.sensorOk = g_mpu.read(ax, ay, az, gx, gy, gz);
-    if (raw.sensorOk) {
-      raw.axMg = SensorPipeline::accelMg(ax);
-      raw.ayMg = SensorPipeline::accelMg(ay);
-      raw.azMg = SensorPipeline::accelMg(az);
-      raw.gxDps10 = SensorPipeline::gyroDps10(gx);
-      raw.gyDps10 = SensorPipeline::gyroDps10(gy);
-      raw.gzDps10 = SensorPipeline::gyroDps10(gz);
-    }
+    // Adxl345::read hands back milli-g directly, so the raw-count conversion
+    // stays inside the driver where the part's bit layout is known.
+    raw.sensorOk = g_accel.read(raw.axMg, raw.ayMg, raw.azMg);
     raw.sw420Raw = digitalRead(kPinSw420) == HIGH;
 
     Sample s{};
@@ -724,9 +711,6 @@ static void detectTask(void*) {
       t.axMg = static_cast<int16_t>(s.axMg);
       t.ayMg = static_cast<int16_t>(s.ayMg);
       t.azMg = static_cast<int16_t>(s.azMg);
-      t.gxDps10 = static_cast<int16_t>(s.gxDps10);
-      t.gyDps10 = static_cast<int16_t>(s.gyDps10);
-      t.gzDps10 = static_cast<int16_t>(s.gzDps10);
       t.magMg = s.magMg;
             t.peakMg = d.magMg;
       t.score = d.score;
@@ -770,7 +754,7 @@ static void uiTask(void*) {
     m.score = g_detector.lastScore();
     m.speedKmh = static_cast<uint8_t>(g_detector.lastSpeedMilliKmh() / 1000);
     m.sensorOk = !g_sensorFault;
-    m.mpuPresent = g_mpu.present();
+    m.accelPresent = g_accel.present();
     m.calibrating = g_pipeline.calibrating();
     m.calibProgressPct = 0;
     m.eventUndelivered = Comm::instance().eventUndelivered();
@@ -802,7 +786,7 @@ static void sysTask(void*) {
     // Fault detection: too many consecutive I2C failures is a detached sensor,
     // and a detector fed zeros will happily call every bump a crash.
     static uint8_t consecutive = 0;
-    if (!g_mpu.present()) {
+    if (!g_accel.present()) {
       if (consecutive < 200) consecutive++;
     } else {
       consecutive = 0;
@@ -852,7 +836,7 @@ void setup() {
   Power::instance().begin();
 
   const bool oledOk = Ui::instance().begin();
-  const bool mpuOk = g_mpu.begin();
+  const bool accelOk = g_accel.begin();
 
   g_detector.configure(saas::DetectorCfg{});
   g_sm.reset();
@@ -873,9 +857,10 @@ void setup() {
   // wrong gravity baseline reports every corner as an orientation change.
   g_pipeline.beginCalibration(millis(), kBootCalibMs);
 
-  if (!mpuOk || !oledOk) {
+  if (!accelOk || !oledOk) {
     // Not fatal for BLE, but the UI shows NOMP and sysTask will raise a fault.
-    Serial.printf("boot: mpu=%d oled=%d\n", mpuOk, oledOk);
+    Serial.printf("boot: adxl345=%d addr=0x%02X oled=%d\n", accelOk,
+                  g_accel.address(), oledOk);
   }
 
   xTaskCreatePinnedToCore(sensorTask, "sensor", kStackSensor, nullptr, kPrioSensor, &g_handle[kWdSensor], 1);

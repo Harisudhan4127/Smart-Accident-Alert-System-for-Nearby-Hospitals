@@ -65,7 +65,7 @@ constexpr Transition kTable[kTriggerCount][proto::kStateCount] = {
                         kGo(proto::kStateFault, proto::kStateIdle, proto::kEvResolved, 0)},
 
     // ---- kFault: sensor loss, watchdog, or a failed self-test --------------
-    // Legal from every state, BOOT included: a device whose MPU did not answer
+    // Legal from every state, BOOT included: a device whose sensor did not answer
     // must be able to say so. This is the one row that is not a sparse set of
     // cases, and deliberately so.
     /* kFault       */ {kGo(proto::kStateBoot, proto::kStateFault, proto::kEvDeviceFault, 0),

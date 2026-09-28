@@ -31,7 +31,7 @@ struct UiModel {
   uint8_t speedKmh;           ///< integer km/h, for the splash/calm screen
   int16_t tiltDeg;            ///< gravity vector off vertical
   bool sensorOk;
-  bool mpuPresent;
+  bool accelPresent;
   bool calibrating;
   uint16_t calibProgressPct;
   bool eventUndelivered;      ///< red-LED flash per docs §8 step 5

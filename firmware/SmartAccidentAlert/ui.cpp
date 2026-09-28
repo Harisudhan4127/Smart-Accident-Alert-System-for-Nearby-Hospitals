@@ -192,7 +192,9 @@ void Ui::loop(uint32_t nowMs, const UiModel& m) {
   }
   if (m.eventUndelivered) g_oled.print(F(" UNDEL"));
   if (!m.sensorOk) g_oled.print(F(" SENSOR"));
-  if (!m.mpuPresent) g_oled.print(F(" NOMP"));
+  // Four characters, like the flags beside it. "NOMP" named a part this build
+  // no longer has; the accelerometer is what can be missing now.
+  if (!m.accelPresent) g_oled.print(F(" NOACC"));
 
   g_oled.display();
 }

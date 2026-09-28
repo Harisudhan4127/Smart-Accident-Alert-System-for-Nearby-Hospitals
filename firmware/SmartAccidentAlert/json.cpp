@@ -579,7 +579,10 @@ size_t buildHelloAck(char* out, size_t cap, const HelloAckView& v) {
   w.key("hw");
   w.string(v.hw);
   w.key("proto");
-  w.uinteger(1);
+  // The advertised version must be the one the frame encoder stamps, or a
+  // client that trusts the JSON will parse frames the scanner would have
+  // rejected. One constant, so the two cannot drift.
+  w.uinteger(proto::kProtocolVersion);
   w.key("chipId");
   w.string(v.chipId);
   w.key("mac");
@@ -594,14 +597,16 @@ size_t buildHelloAck(char* out, size_t cap, const HelloAckView& v) {
   w.boolean(v.charging);
   w.key("uptimeMs");
   w.uinteger(v.uptimeMs);
-  w.key("mpu");
+  w.key("sensor");
   w.beginObject();
+  w.key("part");
+  w.string("ADXL345");
   w.key("present");
-  w.boolean(v.mpuPresent);
+  w.boolean(v.accelPresent);
   w.key("addr");
-  w.string(v.mpuAddr);
-  w.key("whoAmI");
-  w.integer(v.whoAmI);
+  w.string(v.accelAddr);
+  w.key("deviceId");
+  w.integer(v.deviceId);
   w.endObject();
   w.key("oled");
   w.beginObject();
@@ -646,9 +651,6 @@ size_t buildEffectiveConfig(Writer& w, const EffectiveConfigView& v) {
   // calls for a stable, diff-friendly order and the table order is that order.
   w.key("accelThresholdMg");
   w.uinteger(v.accelThresholdMg);
-  w.key("gyroThresholdDps");
-  // Stored in 0.1 deg/s; the wire wants deg/s with one decimal.
-  w.fixed(v.gyroThresholdDps10, 1);
   w.key("vibrationRequired");
   w.boolean(v.vibrationRequired);
   w.key("debounceMs");
@@ -688,8 +690,6 @@ size_t buildStatus(char* out, size_t cap, const StatusView& v) {
   w.endObject();
   w.key("peakMagMg");
   w.uinteger(v.peakMagMg);
-  w.key("peakGyrDps");
-  w.uinteger(v.peakGyrDps);
   w.key("sw420");
   w.boolean(v.sw420);
   w.key("sw420Hits");
@@ -719,10 +719,6 @@ void writeImpact(Writer& w, const ImpactView& i) {
   w.fixed(scaleDiv(i.magMg, 10), 2);
   w.key("peakAccMg");
   w.uinteger(i.peakAccMg);
-  w.key("peakGyrDps");
-  w.uinteger(i.peakGyrDps);
-  w.key("gyrMagDps");
-  w.fixed(i.gyrMagDps10, 1);
   w.key("sw420");
   w.boolean(i.sw420);
   w.key("orientationChangeDeg");
@@ -780,12 +776,6 @@ void calibElement(Writer& w, const CalibSampleView& s) {
   w.integer(s.accY);
   w.key("acc_z");
   w.integer(s.accZ);
-  w.key("gyr_x");
-  w.integer(s.gyrX);
-  w.key("gyr_y");
-  w.integer(s.gyrY);
-  w.key("gyr_z");
-  w.integer(s.gyrZ);
   w.key("sw420");
   w.boolean(s.sw420);
   w.endObject();
@@ -819,8 +809,8 @@ size_t buildDiag(char* out, size_t cap, const DiagView& v) {
   w.uinteger(v.crcErrors);
   w.key("bleClients");
   w.uinteger(v.bleClients);
-  w.key("mpuI2cErrors");
-  w.uinteger(v.mpuI2cErrors);
+  w.key("sensorI2cErrors");
+  w.uinteger(v.accelI2cErrors);
   w.key("oledOk");
   w.boolean(v.oledOk);
   w.key("brownoutCount");
