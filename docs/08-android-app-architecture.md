@@ -191,7 +191,7 @@ publishes it on a timer:
 
 ```dart
 final key = '${(sample.magMg / 1000).toStringAsFixed(2)}|'
-    '${_gyrationDps(sample).toStringAsFixed(0)}|'
+    '${(sample.accZ / 1000).toStringAsFixed(2)}|'
     '${(sample.peakMg / 1000).toStringAsFixed(1)}|'
     '${sample.flags.sw420}|${sample.state.byte}|'
     '${sample.batteryPctOrNull}';
@@ -325,7 +325,7 @@ machine, and synthetic telemetry that distinguishes the cases that matter —
 | `normalDrive` | ~1 g on Z, engine vibration, gentle noise. No alert. |
 | `potholes` | Sharp fast spikes with a short ring-down. **Deliberately does not alert** — a fused detector must reject these, and a simulator that alarmed on every spike would teach the wrong lesson. |
 | `crash` | Hard spike → free-fall → attitude change, with SW-420. Alerts exactly once. |
-| `sensorFault` | MPU6050 stops answering; the node reports `FAULT`. |
+| `sensorFault` | The ADXL345 stops answering, or freezes on one value; the node reports `FAULT`. |
 
 ```bash
 cd app

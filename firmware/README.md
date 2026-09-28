@@ -1,8 +1,13 @@
 # Smart Accident Alert — firmware
 
-ESP32 firmware for the accident-alert node. Detects an impact with an MPU6050,
-corroborates it with speed and free-fall, and alerts the nearest hospital over
-BLE to the phone paired with it.
+ESP32 firmware for the accident-alert node. Detects an impact with an ADXL345
+accelerometer, corroborates it with speed and free-fall, and alerts the nearest
+hospital over BLE to the phone paired with it.
+
+**There is no gyroscope in this build.** The motion sensor is a three-axis
+accelerometer, and no rotation rate is measured or inferred anywhere in this
+firmware. Rotation shows up only as a change in the direction of gravity. See
+`docs/06-accident-detection.md` for what that costs.
 
 The wire contract is frozen and lives outside this directory:
 
@@ -49,8 +54,8 @@ The design point is that **impact and gravity want opposite filters**.
   Speed is differentiated from that, not from the raw signal, or a single impact
   would integrate into a huge phantom velocity.
 
-Gyro gets a 2-tap average: long enough to reject the aliasing the 50 Hz sample
-rate would otherwise fold onto, short enough to keep the impact transient.
+There is no third path. The ADXL345 has three axes and all three go down both
+of these.
 
 The biquad state is Q15 and is **not** shifted each sample. Only the output
 expression shifts. This is the classic Q15 filter bug: shifting the state as well
@@ -64,9 +69,9 @@ sustained low-g, so a single-sample dip cannot fake it.
 ## Detection
 
 Fusion is fixed-point, and the weights are in `config.h`. The z-score against a
-frozen baseline, the raw magnitude, the jerk magnitude, the gyro magnitude, the
-free-fall bit, the SW-420 contact and the speed floor are combined into a single
-`0–100` score. Two thresholds matter: a candidate floor, and a higher trip
+frozen baseline, the raw magnitude, the jerk magnitude, the free-fall bit, the
+SW-420 contact, the gravity-vector rotation and the speed floor are combined
+into a single `0–100` score. Two thresholds matter: a candidate floor, and a higher trip
 threshold that also has to be held for `debounceMs` so a pothole cannot latch the
 node. A release knee below the candidate floor provides hysteresis.
 
@@ -98,7 +103,7 @@ available in this environment, so that path is unverified.
 
 | Signal | GPIO | Notes |
 | --- | --- | --- |
-| I²C SDA / SCL | 21 / 22 | MPU6050 and the SSD1306 share the bus. |
+| I²C SDA / SCL | 21 / 22 | The ADXL345 (`0x53`, falling back to `0x1D`) and the SSD1306 (`0x3C`) share the bus. Three devices will not fit at the default addresses. |
 | SW-420 | 27 | **Active HIGH** (`kSw420ActiveHigh`): the module pulls the line *high* when it vibrates. Debounced 25 ms, interrupt on both edges. Wiring it as active-low inverts the signal and disables the vibration term. |
 | Buzzer | 25 | **Active LOW** (`kBuzzerActiveLow`) through an NPN — the transistor conducts to sound it. |
 | SOS button | 26 | **Active LOW** (`kSosButtonActiveLow`) to GND, internal pull-up. |
@@ -106,7 +111,7 @@ available in this environment, so that path is unverified.
 | Battery ADC | 34 | Input-only pin, correct for a divider. |
 | Charge status | 35 | TP4056 `CHRG`, open-drain, optional. |
 
-The MPU6050 is assumed to be mounted so that the vehicle's forward axis is `+X`.
+The ADXL345 is assumed to be mounted so that the vehicle's forward axis is `+X`.
 The speed integrator depends on that; the accelerometer axes are otherwise
 symmetric.
 

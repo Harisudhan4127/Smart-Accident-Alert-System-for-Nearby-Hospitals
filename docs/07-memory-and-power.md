@@ -119,7 +119,7 @@ behind it.
 | --- | --- | --- | --- | --- |
 | Active | ESP32 CPU, both cores, Wi-Fi off | 80–120 mA | 100 % | **~100 mA** |
 | Active | ESP32 BLE advertising + 50 Hz telemetry | +20–30 mA | while connected | ~0–30 mA |
-| Active | MPU6050 at 1 kHz internal rate | 3.5 mA | 100 % | ~3.5 mA |
+| Active | ADXL345 at 100 Hz ODR | 0.1–0.2 mA | 100 % | **~0.14 mA** |
 | Active | SSD1306 OLED | 10–20 mA | 100 % | **~15 mA** |
 | Active | Buzzer | 20–30 mA | when alarming | ~0 mA idle |
 | Active | LDO quiescent + divider | 1–5 mA | 100 % | ~3 mA |
@@ -130,10 +130,12 @@ Against a 2000 mAh cell that is **8–17 hours**, not the weeks a reader might
 assume from "battery powered". The two dominant terms are the CPU running flat
 and the OLED, and they are the two that a working sleep policy would attack.
 
-The accelerator's own DLPF setting is part of this: `kMpuDlpf = 3` keeps the
-internal output rate at 1 kHz, which is a fixed cost whether or not anyone reads
-a sample at 50 Hz. Dropping to the accelerometer's low-power mode between reads
-would be a real win, and is not implemented.
+**The sensor swap improved the power budget for free.** The MPU6050 ran its
+internal rate at 1 kHz — set by `kMpuDlpf` — and cost ~3.5 mA whether or not
+anyone read a sample. The ADXL345 at its 100 Hz output rate draws ~140 µA. That
+is roughly 3.4 mA off the idle total, about 2% here, and it was not a change
+anyone had to design for. The accelerometer does have a low-power mode that
+would save less again; it is not implemented.
 
 ## What implementing the sleep policy would buy
 

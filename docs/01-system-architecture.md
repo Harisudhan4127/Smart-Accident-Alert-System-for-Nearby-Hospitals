@@ -9,7 +9,7 @@ between them that explains most of the rest of this codebase.
   VEHICLE                          PHONE                        CLOUD
   ┌──────────────┐                ┌───────────────┐            ┌──────────────┐
   │ ESP32        │   BLE          │ Flutter app   │  HTTPS     │ Firestore    │
-  │ ├ MPU6050    │ ─────────────► │ ├ BLE link    │ ─────────► │ ├ accidents  │
+  │ ├ ADXL345    │ ─────────────► │ ├ BLE link    │ ─────────► │ ├ accidents  │
   │ ├ SW-420     │  notifications │ ├ GPS         │            │ ├ users      │
   │ ├ detector   │  + writes      │ ├ outbox      │ ◄───────── │ └ hospitals  │
   │ └ state      │                │ └ UI          │  callable  │              │
@@ -55,7 +55,7 @@ Consequences that show up repeatedly:
 
 | Task | Priority | Stack | Core | Period | Job |
 | --- | --- | --- | --- | --- | --- |
-| `sensor` | 6 | 4096 | 1 | 20 ms | Blocking I²C read of the MPU6050, plus the SW-420 pin |
+| `sensor` | 6 | 4096 | 1 | 20 ms | Blocking I²C read of the ADXL345, plus the SW-420 pin |
 | `detect` | 5 | 4096 | 1 | 20 ms, drift-corrected | Seven-term fusion, state machine, telemetry, alarm outputs |
 | `wdt` | 7 | 2048 | 0 | 100 ms | `checkWatchdog()` — resets the chip if any task slot has starved |
 | `ble` | 4 | 6144 | 0 | 5 ms | NimBLE host, connection supervision, event sequencer |
@@ -92,22 +92,31 @@ checkable by reading a header instead of by profiling.
 
 ## Detection: one trip, not a stream of them
 
-The detector fuses seven weighted terms into a 0–100 score, with hysteresis
+The detector fuses six weighted terms into a 0–100 score, with hysteresis
 (trip at 70, release at 45). The weights, in `config.h`:
 
 | Term | Weight | What it catches |
 | --- | --- | --- |
-| Free fall | 0.26 | Loss of ground contact: `|a| < 0.3 g` for 60 ms |
-| z-score | 0.20 | Acceleration surprise against a rolling 1 s baseline |
-| SW-420 | 0.15 | An independent mechanical switch — a different failure mode from the accelerometer |
-| Gyro | 0.12 | Rotation during the event |
-| Absolute magnitude | 0.11 | Severity |
-| Orientation | 0.10 | Gravity-vector rotation |
+| Free fall | 0.30 | Loss of ground contact: `|a| < 0.3 g` for 60 ms |
+| z-score | 0.23 | Acceleration surprise against a rolling 1 s baseline |
+| SW-420 | 0.17 | An independent mechanical switch — a different failure mode from the accelerometer |
+| Absolute magnitude | 0.13 | Severity |
+| Orientation | 0.11 | Gravity-vector rotation — the only rotation evidence an accelerometer can give |
 | Jerk | 0.06 | d|mag|/dt |
 
-The SW-420 is deliberately only 0.15. §9 of the project plan is emphatic that a
-vibration switch alone must not trigger an alert, and the weighting is how that
-is honoured: the accelerometer does the detecting and the switch corroborates.
+There is no gyroscope term. The node's motion sensor is an ADXL345, a
+three-axis accelerometer; it measures acceleration and no rotation rate is
+derived from it. The weight the old gyro term held (0.12) was redistributed
+across the six above, so the trip threshold and the shipped sensitivity are
+unchanged by the swap. See [06](06-accident-detection.md) for why a fabricated
+rate was not an option.
+
+The SW-420 is deliberately short of a threshold on its own. §9 of the project
+plan is emphatic that a vibration switch alone must not trigger an alert, and
+the weighting is how that is honoured: the accelerometer does the detecting and
+the switch corroborates. It carries more weight than it used to (0.17, from
+0.15) because with no gyroscope it is the only input that feels a spin the
+gravity vector misses.
 
 After a trip the detector is blind for `kDetectorRefractoryMs = 5000`. One
 crash spans dozens of samples and the ring-down still reads above the candidate
@@ -151,7 +160,7 @@ yet.
 | GPS unavailable | `geolocator` | **Not implemented** — no app UI exists | Show `GPS LOCATION UNAVAILABLE` (§25) |
 | Phone battery low | Battery ADC on the node, 1 Hz | Reported in `STATUS`/telemetry; the app does not read it | Warn the user (§25) |
 | Cloud unreachable | App | **Not implemented** | Retry with backoff |
-| MPU6050 absent or stalled | `sysTask`: 100 consecutive 1 Hz failures | `Trigger::kFault` → `FAULT` state, `DEVICE_FAULT` event queued, red LED | Same. A detector fed zeros would call every bump a crash |
+| ADXL345 absent or stalled | `sysTask`: 100 consecutive 1 Hz failures | `Trigger::kFault` → `FAULT` state, `DEVICE_FAULT` event queued, red LED | Same. A detector fed zeros would call every bump a crash |
 | False alarm | User presses SOS again, or `CANCEL` | Countdown cancelled, node returns to `IDLE` | Same — this one works |
 
 The "actual behaviour" column is the honest one. Three of the six rows in the

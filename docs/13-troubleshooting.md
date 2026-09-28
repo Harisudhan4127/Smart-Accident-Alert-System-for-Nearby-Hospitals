@@ -106,8 +106,9 @@ If it never settles, the node is probably rebooting — check for brownouts abov
    notification. The protocol's padding handles this, but if the firmware is
    older than the padding change, frames will be truncated and fail CRC.
 3. `DIAG.loopHz` should read ~50. If it reads 0, the sensor task is not running
-   — the usual cause is an MPU6050 that is not answering, so `sensors.cpp` is
-   retrying forever.
+   — the usual cause is an ADXL345 that is not answering, so `sensors.cpp` is
+   retrying forever. The boot line names the address it settled on
+   (`boot: adxl345=1 addr=0x53`); `adxl345=0` means the part never answered.
 
 ### Telemetry arrives but the app shows `—`
 
@@ -145,13 +146,12 @@ Expected, and the reason the detector is fused rather than a threshold. In order
 of effect:
 
 1. raise `kAccelThresholdMg` (in `config.h`) toward 4000;
-2. raise `kGyroThresholdDps`;
-3. increase the debounce window;
+2. increase the debounce window;
 4. raise `minSpeedKmh` — a pothole at 80 km/h should still trigger, one at
    20 km/h need not;
 5. if the false alarms are on *bump* sensors rather than potholes, check the
-   **mounting**: a node flexing in a bracket is a motion the IMU cannot
-   distinguish from a crash.
+   **mounting**: a node flexing in a bracket is a motion an accelerometer
+   cannot distinguish from a crash.
 
 **Record every false alarm's telemetry.** A false alarm is a labelled negative
 and is the most valuable data the system produces.

@@ -46,7 +46,7 @@ implementations, and regenerating `golden.json`.**
 | `0x07` | `ACK` | node → phone | JSON |
 | `0x08` | `ERROR` | node → phone | JSON |
 | `0x09` | `EVENT` | node → phone | JSON |
-| `0x10` | `TELEMETRY` | node → phone | **binary 24 B** |
+| `0x10` | `TELEMETRY` | node → phone | **binary 18 B** |
 | `0x11` | `STATUS` | node → phone | JSON |
 | `0x12` | `HELLO_ACK` | node → phone | JSON |
 | `0x13` | `CALIB_LOG` | node → phone | JSON |
@@ -322,7 +322,6 @@ order.
 | Constant | Default | Bounds |
 | --- | --- | --- |
 | `kAccelThresholdMg` | 3000 | 1500–8000 |
-| `kGyroThresholdDps` | 220 | 80–800 |
 | `kDebounceMs` | 60 | 20–500 |
 | `kConfirmWindowSec` | 10 | 5–120 |
 | `kMinSpeedKmh` | 5.0 | 0–60 |
