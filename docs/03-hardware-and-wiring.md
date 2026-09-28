@@ -10,13 +10,13 @@ and the timing constants. Where `firmware/README.md` disagrees with `config.h`,
 | # | Component | Qty | Interface | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | ESP32 DevKit v1 | 1 | — | 30-pin. Dual core, 4 MB flash, Wi-Fi unused |
-| 2 | MPU6050 | 1 | I²C `0x68` | Accel ±4 g, gyro ±500 °/s |
+| 2 | ADXL345 | 1 | I²C `0x53` | 3-axis accel ±16 g. Falls back to `0x1D`. **No gyroscope** |
 | 3 | SW-420 | 1 | GPIO 27 | Vibration switch. **Active high** |
 | 4 | Buzzer | 1 | GPIO 25 | **Active low**, via NPN |
 | 5 | SOS button | 1 | GPIO 26 | **Active low**, internal pull-up |
 | 6 | Green LED | 1 | GPIO 32 | **Active high** |
 | 7 | Red LED | 1 | GPIO 33 | **Active high** |
-| 8 | 0.96" SSD1306 OLED | 1 | I²C `0x3C` | Shares the MPU bus |
+| 8 | 0.96" SSD1306 OLED | 1 | I²C `0x3C` | Shares the accelerometer bus |
 | 9 | Li-ion + TP4056 | 1 | GPIO 34 (ADC), 35 (CHRG) | 2:1 divider for the sense wire |
 | 10 | 220 Ω resistors | 3 | — | LED current limiting |
 | 11 | 1 kΩ resistors | 2 | — | SW-420 pull-up, button if the internal one is bypassed |
@@ -60,7 +60,7 @@ worth knowing about before you respin a board.
             │            ├── 2:1 divider ── GPIO 34 (ADC1_CH6)
             │            └── CHRG ────────── GPIO 35
             │
-            └── VS-3V3 regulator ── ESP32, MPU6050, OLED, SW-420
+            └── VS-3V3 regulator ── ESP32, ADXL345, OLED, SW-420
 ```
 
 - **Divider:** two equal resistors, so the ADC sees `cell / 2`. A 4.2 V cell
@@ -112,9 +112,14 @@ device list.
 
 ## Assembly notes that are easy to get wrong
 
-1. **I²C pull-ups.** Most MPU6050 and SSD1306 breakout boards carry their own
+1. **I²C pull-ups.** Most ADXL345 and SSD1306 breakout boards carry their own
    4.7 kΩ pull-ups. Two sets in parallel is fine. If you add a third device,
    400 kHz stops being reliable with everything on 2.2 kΩ.
+   **Three devices cannot share one bus at the default addresses.** The
+   accelerometer uses `0x53` (or `0x1D`) and the OLED `0x3C`, which is two.
+   The firmware probes `0x53` first and falls back to `0x1D`, so an
+   ADXL345 with SDO tied high works — but a second accelerometer would need an
+   I²C multiplexer.
 2. **The buzzer needs a transistor.** It is 30+ mA; a GPIO is not. Active-low
    means the transistor is NPN with the emitter to ground and the base driven
    through 1 kΩ.
@@ -127,9 +132,16 @@ device list.
    what the road does — but only if it is not bouncing on its own mount. A
    3D-printed or foam-and-tape mount is the difference between a usable baseline
    and a detector that cannot find its baseline.
-5. **The MPU6050 needs a 3.3 V rail.** It is not 5 V tolerant. Most breakouts
-   carry a regulator, but not all of them.
-6. **GND must be common.** Battery, TP4056, regulator, sensors. An I²C bus with
+5. **The ADXL345 needs a 3.3 V rail.** Its I²C pins are 5 V tolerant, but `VS`
+   is not — 5 V on the supply destroys the part. Most breakouts carry a
+   regulator; check yours, because the ones that do not are the ones that
+   silently fail at 5 V.
+6. **SDO decides the address, and you cannot see it on the board.** Tying SDO
+   low gives `0x53`; high gives `0x1D`. The firmware handles either and reports
+   which it found in `HELLO_ACK.sensor.addr`, but if you ever see `0x1D` on a
+   board you expected to be `0x53`, that is a wiring fact worth knowing before
+   you go looking for a fault elsewhere.
+7. **GND must be common.** Battery, TP4056, regulator, sensors. An I²C bus with
    two grounds and a floating sensor produces the classic "works when you touch
    it" fault.
 
@@ -142,8 +154,10 @@ fastest:
    reading *before* anything is on the I²C bus. A wrong divider makes the
    battery percentage nonsense for the rest of the project.
 2. **I²C alone.** Run with `SAAS_ENABLE_OLED=0` and the buzzer disabled. Get a
-   clean MPU6050 stream on the serial monitor first. Two devices on one bus fail
-   for different reasons than one device on a broken bus.
+   clean ADXL345 stream on the serial monitor first. Two devices on one bus fail
+   for different reasons than one device on a broken bus. The boot line prints
+   the address it settled on — `boot: adxl345=1 addr=0x53 oled=1` — which tells
+   you immediately whether the part answered and where.
 3. **SW-420 by hand.** Tap the module and watch GPIO 27 on the monitor. If the
    pin does not go high, the pot or the wiring is wrong and nothing downstream
    will tell you.

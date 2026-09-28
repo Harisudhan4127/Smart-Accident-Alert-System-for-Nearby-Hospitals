@@ -15,11 +15,11 @@ performance trap on a 3.3 V / 240 MHz microcontroller:
 | --- | --- | --- | --- |
 | JSON per sample | ~180 B | ~1.9 ms | `snprintf` + float formatting dominates |
 | Plain CSV per sample | ~34 B | ~0.35 ms | fragile, unframed, no CRC |
-| **This protocol** | **24 B** | **~0.02 ms** | fixed memcpy, no allocator, no `printf` |
+| **This protocol** | **18 B** | **~0.02 ms** | fixed memcpy, no allocator, no `printf` |
 
 The design splits the traffic by nature:
 
-* **Telemetry** (the high-rate path, 50 Hz) → **24-byte fixed binary record**. Zero parsing,
+* **Telemetry** (the high-rate path, 50 Hz) → **18-byte fixed binary record**. Zero parsing,
   zero allocation, one `memcpy`.
 * **Events** (rare, latency-critical, must be human-debuggable in nRF Connect) → **UTF-8 JSON**.
 
@@ -55,7 +55,7 @@ drain fast enough; a single stream would drop *events* (the important ones) alon
 
 | Parameter | Value | Reason |
 | --- | --- | --- |
-| MTU | 247 (request), 23 fallback | 24 B telemetry fits one packet with room for framing |
+| MTU | 247 (request), 23 fallback | 18 B telemetry fits one packet with room for framing |
 | Connection interval | 15 ms (24 units @ 1 ms) | ≤ 67 Hz, comfortably above 50 Hz telemetry |
 | Slave latency | 4 | allows the peripheral to sleep 4 intervals between events |
 | Supervision timeout | 4 s (4000 units @ 10 ms) | fast disconnect detection |
@@ -82,19 +82,32 @@ unknown peripherals.
  +------ +------+------+------+--------+---------------+-----------+--------+
  | 0xA5 | 0x5A | VER  | TYPE | LEN(2) |  PAYLOAD      | CRC16(2)  | (pad)  |
  +------+------+------+------+--------+---------------+-----------+--------+
-   SOF0   SOF1   0x01   u8     LE      LEN bytes      LE
+   SOF0   SOF1   0x02   u8     LE      LEN bytes      LE
 ```
 
 | Field | Size | Notes |
 | --- | --- | --- |
 | `SOF0` `SOF1` | 2 | Start-of-frame. Resynchronises the parser after garbage on the link. |
-| `VER` | 1 | Protocol version, currently `0x01`. Receiver drops frames with an unknown version. |
+| `VER` | 1 | Protocol version, currently `0x02`. Receiver drops frames with an unknown version. |
+
+**Version history.**
+
+| `VER` | Change |
+| --- | --- |
+| `0x01` | Six-axis telemetry: three accel axes and three gyroscope axes, 24 B. |
+| `0x02` | The node's motion sensor is an **ADXL345**, which has no gyroscope. The three gyro axes were **removed**, taking the record to 18 B. |
+
+The gyro bytes were deleted rather than zero-filled. A stream of exact zeros
+reads as a healthy gyroscope that never turns, and anything built on top of it —
+a trend, a health check, an alert — would be confidently wrong. Bumping `VER`
+means an old app rejects a new node at the first frame instead of misreading
+one: the version check happens before the payload is interpreted.
 | `TYPE` | 1 | See §4. |
 | `LEN` | 2 u16 LE | Payload byte count, `0 … 512`. |
 | `PAYLOAD` | LEN | Binary record or UTF-8 JSON (no BOM, no trailing NUL). |
 | `CRC16` | 2 u16 LE | CRC-16/CCITT-FALSE over `VER … last PAYLOAD byte`. |
 
-**Padding.** A 24-byte telemetry record in a 247-byte MTU does not need padding. For
+**Padding.** An 18-byte telemetry record in a 247-byte MTU does not need padding. For
 compatibility with 23-byte-MTU phones the writer MAY pad to a 4-byte boundary; the `LEN` field
 governs parsing, so padding is always ignored. Readers MUST ignore trailing bytes after `LEN`.
 
@@ -104,7 +117,7 @@ pending. On `0xA5` the parser latches; on `0x5A` it proceeds, else it re-latches
 large allocation. This is the difference between a 60-byte static buffer (used) and a
 `malloc(65535)` on a corrupt length (a classic ESP32 crash).
 
-**Compute why this matters.** A 512 KB PSRAM heap with a 24 B telemetry record at 50 Hz is
+**Compute why this matters.** A 512 KB PSRAM heap with an 18 B telemetry record at 50 Hz is
 1.2 KB/s of garbage. Over a 6-hour drive that is 26 MB of allocation churn through the ESP32's
 slow heap path, which is exactly what causes the classic "works for 20 minutes, then crashes"
 failure. A single static SPSC ring buffer per channel removes the allocator from the hot path
@@ -126,7 +139,7 @@ entirely.
 | `0x07` | `ACK` | ← | CTRL | JSON |
 | `0x08` | `ERROR` | ← | CTRL | JSON |
 | `0x09` | `EVENT` | ← | CTRL | JSON |
-| `0x10` | `TELEMETRY` | ← | TX | **binary 24 B** |
+| `0x10` | `TELEMETRY` | ← | TX | **binary 18 B** |
 | `0x11` | `STATUS` | ← | CTRL | JSON |
 | `0x12` | `HELLO_ACK` | ← | CTRL | JSON |
 | `0x13` | `CALIB_LOG` | ← | CTRL | JSON array |
@@ -138,7 +151,7 @@ has exactly one event parser to keep in sync with the firmware rather than a doz
 
 ---
 
-## 5. Telemetry Record (binary, 24 bytes, TYPE `0x10`)
+## 5. Telemetry Record (binary, 18 bytes, TYPE `0x10`)
 
 | Off | Type | Field | Unit | Range |
 | --- | --- | --- | --- | --- |
@@ -146,15 +159,19 @@ has exactly one event parser to keep in sync with the firmware rather than a doz
 | 4 | `i16` | `acc_x` | milli-g | ±32000 |
 | 6 | `i16` | `acc_y` | milli-g | ±32000 |
 | 8 | `i16` | `acc_z` | milli-g | ±32000 |
-| 10 | `i16` | `gyr_x` | 0.1 °/s | ±32000 |
-| 12 | `i16` | `gyr_y` | 0.1 °/s | ±32000 |
-| 14 | `i16` | `gyr_z` | 0.1 °/s | ±32000 |
-| 16 | `u16` | `mag_mg` | milli-g | 0…65535 |
-| 18 | `u16` | `peak_mg` | milli-g | 0…65535 |
-| 20 | `u8` | `flags` | bitfield | §5.1 |
-| 21 | `u8` | `impact_score` | 0…100 | detector confidence |
-| 22 | `u8` | `battery_pct` | 0…100 | 255 = unknown |
-| 23 | `u8` | `state` | enum | §5.2 |
+| 10 | `u16` | `mag_mg` | milli-g | 0…65535 |
+| 12 | `u16` | `peak_mg` | milli-g | 0…65535 |
+| 14 | `u8` | `flags` | bitfield | §5.1 |
+| 15 | `u8` | `impact_score` | 0…100 | detector confidence |
+| 16 | `u8` | `battery_pct` | 0…100 | 255 = unknown |
+| 17 | `u8` | `state` | enum | §5.2 |
+
+**There is no rotation rate on this record, and there cannot be.** The node's
+motion sensor is an ADXL345, a three-axis accelerometer. It measures
+acceleration, not angular velocity, and no rate is inferred from it anywhere in
+the firmware. A rollover is still detected — as a change in the direction of
+gravity, which the `acc_*` axes carry — but that is a different measurement with
+different units, and it is not in this record.
 
 ### 5.1 `flags` bitfield
 
@@ -195,7 +212,7 @@ floats rounded to 7 decimal places for coordinates.
 {
   "app": "smart-accident-alert",
   "appVersion": "1.0.0",
-  "proto": 1,
+  "proto": 2,
   "capabilities": ["telemetry", "config", "calibrate", "command", "diag"],
   "deviceName": "My Car",
   "locale": "en-IN"
@@ -208,7 +225,7 @@ floats rounded to 7 decimal places for coordinates.
 {
   "fwVersion": "1.0.0",
   "hw": "esp32-devkit-v1",
-  "proto": 1,
+  "proto": 2,
   "chipId": "A1B2C3D4",
   "mac": "24:6F:28:A1:B2:C3:D4",
   "name": "SAAS-A1B2C3D4",
@@ -216,7 +233,7 @@ floats rounded to 7 decimal places for coordinates.
   "batteryPct": 96,
   "charging": false,
   "uptimeMs": 123456,
-  "mpu": { "present": true, "addr": "0x68", "whoAmI": 113 },
+  "sensor": { "part": "ADXL345", "present": true, "addr": "0x53", "deviceId": 229 },
   "oled": { "present": true, "addr": "0x3C" },
   "sw420": true,
   "calibrated": true,
@@ -225,9 +242,16 @@ floats rounded to 7 decimal places for coordinates.
 }
 ```
 
-`mpu.present`, `oled.present` and `sw420` are the **capability negotiation** mechanism: a user
-who has not yet wired the OLED still gets a fully working app, because the app renders the
+`sensor.present`, `oled.present` and `sw420` are the **capability negotiation** mechanism: a
+user who has not yet wired the OLED still gets a fully working app, because the app renders the
 degraded state instead of erroring.
+
+`deviceId` is the ADXL345's `DEVID` register, `229` (`0xE5`). Unlike the MPU6050 family this
+replaces, there is no table of interchangeable parts to recognise: an ADXL345 answers `0xE5` or
+it is not there, so a different value means something else is on the bus at that address.
+`addr` is worth reading too — two ADXL345s cannot share a bus with the SSD1306 at
+`0x53`/`0x1D`/`0x3C`, so `0x1D` means SDO is strapped the other way. The firmware handles it;
+DIAG reports it.
 
 ### 6.3 `DEVICE_INFO` (device → phone, `0x20`, INFO characteristic)
 
@@ -250,7 +274,6 @@ a fire-and-forget write with no read-modify-write race.
 ```json
 {
   "accelThresholdMg": 3000,
-  "gyroThresholdDps": 220,
   "vibrationRequired": true,
   "debounceMs": 60,
   "confirmWindowSec": 10,
@@ -266,8 +289,7 @@ a fire-and-forget write with no read-modify-write race.
 
 | Key | Unit | Default | Bounds accepted |
 | --- | --- | --- | --- |
-| `accelThresholdMg` | milli-g | `3000` | 1500 … 8000 |
-| `gyroThresholdDps` | °/s | `220` | 80 … 800 |
+| `accelThresholdMg` | milli-g | `3000` | 1500 … 16000 |
 | `vibrationRequired` | bool | `true` | — |
 | `debounceMs` | ms | `60` | 20 … 500 |
 | `confirmWindowSec` | s | `10` | 5 … 120 |
@@ -292,7 +314,6 @@ worse than one that clamps.
   "sinceMs": 8123,
   "effectiveConfig": { "accelThresholdMg": 3000, "telemetryHz": 50, "...": "..." },
   "peakMagMg": 4820,
-  "peakGyrDps": 391,
   "sw420": false,
   "sw420Hits": 3,
   "score": 72,
@@ -319,9 +340,7 @@ One envelope, discriminator `type`:
   "impact": {
     "magG": 4.82,
     "peakAccMg": 4820,
-    "peakGyrDps": 391,
-    "gyrMagDps": 402.1,
-    "sw420": true,
+      "sw420": true,
     "orientationChangeDeg": 63.4,
     "preImpactSpeedKmh": 48.3
   },
@@ -370,7 +389,7 @@ Replies with `CALIB_LOG` (`0x13`) — an array of downsampled samples so the app
 calibration chart and the user can see the vehicle is genuinely still:
 
 ```json
-{ "t_ms": 100, "acc_x": 12, "acc_y": -34, "acc_z": 1002, "gyr_x": 3, "gyr_y": -1, "gyr_z": 5, "sw420": false }
+{ "t_ms": 100, "acc_x": 12, "acc_y": -34, "acc_z": 1002, "sw420": false }
 ```
 
 ### 6.9 `DIAG` (device → phone, `0x14`)
@@ -387,7 +406,7 @@ calibration chart and the user can see the vehicle is genuinely still:
   "droppedFrames": 0,
   "crcErrors": 0,
   "bleClients": 1,
-  "mpuI2cErrors": 0,
+  "sensorI2cErrors": 0,
   "oledOk": true,
   "brownoutCount": 0,
   "watchdogResets": 0,
@@ -479,7 +498,7 @@ Firestore — see `docs/05-app.md`.
 
 | Task | Core | Period | Budget | Typical |
 | --- | --- | --- | --- | --- |
-| `sensorTask` — I²C burst read MPU6050 | 1 | 20 ms | 8 ms | 1.4 ms |
+| `sensorTask` — I²C read of the ADXL345 | 1 | 20 ms | 8 ms | 1.4 ms |
 | `detectTask` — filter + fuse + score | 1 | 20 ms | 1 ms | 0.05 ms |
 | `bleTask` — telemetry pack + notify | 0 | 20 ms | 3 ms | 0.20 ms |
 | `uiTask` — OLED redraw on change only | 0 | 100 ms | 5 ms | 1.1 ms |
