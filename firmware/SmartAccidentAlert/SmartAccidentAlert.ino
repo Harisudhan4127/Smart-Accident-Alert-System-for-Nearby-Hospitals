@@ -15,16 +15,20 @@
 // nothing allocates after setup().
 
 #include <Arduino.h>
+
+#include <math.h>
 #include <Wire.h>
 #include <esp_mac.h>
 
 #include "comm.h"
 #include "config.h"
+#include "demomode.h"
 #include "detector.h"
 #include "json.h"
 #include "power.h"
 #include "protocol.h"
 #include "sensors.h"
+#include "sensordiag.h"
 #include "state_machine.h"
 #include "ui.h"
 
@@ -37,17 +41,27 @@ using namespace saas;
 
 namespace {
 
-// Task ids for the watchdog slots; must match Power::kTaskSlots.
+// Task ids for the watchdog slots are `saas::WdTask` in power.h, not declared
+// here. They used to live in this file, and the critical-set predicate in
+// power.h carried its own copy of the numbers — and disagreed with this one
+// about which index was which task. One declaration now, shared by the feeder,
+// the checker and the test.
+//
 // One slot per task, plus the watchdog. The watchdog is deliberately its own
 // entry rather than reusing `kWdCount - 1`, which is `kWdSys` — a previous build
 // stored the watchdog's handle there and silently clobbered the sysTask handle,
 // so the diagnostics display showed a task that had been replaced.
-enum WdTask : uint8_t { kWdSensor = 0, kWdDetect, kWdBle, kWdUi, kWdSys, kWdWatchdog, kWdCount };
 
 saas::Adxl345 g_accel;
 saas::SensorPipeline g_pipeline;
 saas::Detector g_detector;
 saas::StateMachine g_sm;
+/// NORMAL/DEMO switch and the demo shake trigger. Fed from detectTask, read by
+/// uiTask; see demomode.h for why that needs no lock.
+saas::DemoTrigger g_demo;
+/// Per-sensor health evidence for DIAGNOSTIC mode. Fed alongside g_demo from
+/// detectTask, read by uiTask; see sensordiag.h.
+saas::SensorHealth g_health;
 
 /// SPSC: sensorTask writes, detectTask reads. Losing a sample here would mean
 /// losing a crash, so this ring is sized to absorb a full detectTask stall and
@@ -121,26 +135,112 @@ static void buildIdentity() {
 // Battery
 // ---------------------------------------------------------------------------
 
-/// One ADC sample, oversampled 16x. A single sample of a LiPo divider is noisy
-/// enough to swing the percentage by several points, which would make the OLED
-/// number flicker constantly and wake the UI task for nothing.
-static uint16_t g_batteryAdc() {
+// The battery ADC has exactly one owner.
+//
+// `analogReadMilliVolts` on core 3.3 drives the ADC oneshot driver, and that
+// driver is not reentrant: two cores inside it at once gives
+//   E (7532) adc_oneshot: adc_oneshot_get_calibrated_result(330): read fail
+// which is what the log showed, several times a second, forever.
+//
+// It happened because the reading was taken at every call site. detectTask alone
+// was doing 50 Hz x 16 oversampling = 800 reads/second on core 1, uiTask was
+// doing another 160 on core 0, and both the detector and the display wanted the
+// answer more often than a LiPo divider can possibly change.
+//
+// So: one owner, one cadence, everyone else reads the cache. The value moves by
+// a few millivolts per minute; sampling it 800 times a second was never buying
+// anything, and it was costing a driver-level fault.
+portMUX_TYPE g_batteryLock = portMUX_INITIALIZER_UNLOCKED;
+volatile uint32_t g_batteryMvCache = 0;  ///< 0 = not sampled yet
+
+/// Samples the battery. **sysTask only.** Every other reader must use
+/// batteryMvCached().
+static void refreshBattery() {
+  // 16x oversampling: a single sample of a LiPo divider swings the percentage
+  // by several points, which would make the OLED number flicker and wake the UI
+  // task for nothing.
   uint32_t acc = 0;
   for (uint8_t i = 0; i < 16; i++) acc += analogReadMilliVolts(kPinBatteryAdc);
-  return static_cast<uint16_t>(acc / 16);
+  const uint32_t mv = acc / 16;
+  portENTER_CRITICAL(&g_batteryLock);
+  g_batteryMvCache = mv;
+  portEXIT_CRITICAL(&g_batteryLock);
+}
+
+/// The last battery reading, in millivolts. 0 until sysTask has sampled once.
+static uint32_t batteryMvCached() {
+  portENTER_CRITICAL(&g_batteryLock);
+  const uint32_t mv = g_batteryMvCache;
+  portEXIT_CRITICAL(&g_batteryLock);
+  return mv;
+}
+
+/// Cached millivolts as a battery percentage, or 255 when not yet known.
+static uint8_t batteryPctCached() {
+  const uint32_t mv = batteryMvCached();
+  return mv ? batteryPercent(static_cast<uint16_t>(mv)) : 255;
 }
 
 /// TP4056 CHRG is open-drain and pulls LOW while charging; on a board with no
 /// CHRG wire we fall back to a voltage that is still rising, which is what
 /// kChargingHeuristic in config.h is for.
+///
+/// Reads the cache, never the ADC — see refreshBattery().
 static bool g_charging() {
   if (kChargingPinPresent) return digitalRead(kPinChargingStat) == LOW;
-  static uint16_t lastMv = 0;
-  const uint16_t mv = batteryMilliVolts(g_batteryAdc());
-  const bool rising = mv > lastMv;
-  lastMv = mv;
+  static uint32_t lastMv = 0;
+  const uint32_t mv = batteryMvCached();
+  const bool rising = mv != 0 && mv > lastMv;
+  if (mv) lastMv = mv;
   return kChargingHeuristic ? rising : false;
 }
+
+// ---------------------------------------------------------------------------
+// Small shared helpers
+// ---------------------------------------------------------------------------
+
+/// Clamp to a range. Duplicated here rather than reached for from sensors.h
+/// because that one is a private static of SensorPipeline, and a second
+/// `clamp` in a namespace would be the kind of near-duplicate that ends up with
+/// two subtly different versions.
+static int32_t clamp32(int32_t v, int32_t lo, int32_t hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/// Angle of the measured gravity vector away from vertical, whole degrees.
+///
+/// Uses the *filtered* gravity vector, not the raw axes: the raw vector swings
+/// with every bump, and a tilt readout that jitters with the road is useless for
+/// spotting that a node is mounted crooked.
+///
+/// This is the one place the firmware calls into libm at display rate. The
+/// argument here is not that a float is forbidden — it is that `acos` is the
+/// honest way to get this number. An earlier version of this function used the
+/// small-angle approximation `cos^-1(x) ~ 1 - x`, which is accurate near upright
+/// and badly wrong at 90 deg: a node lying on its side would have reported about
+/// 28 deg of tilt. On a safety display a cheap approximation that is wrong
+/// exactly when the node is most obviously wrong is not a saving.
+static int32_t tiltDegrees(int32_t gx, int32_t gy, int32_t gz) {
+  const double mx = static_cast<double>(gx);
+  const double my = static_cast<double>(gy);
+  const double mz = static_cast<double>(gz);
+  const double mag = sqrt(mx * mx + my * my + mz * mz);
+  // A gravity vector of zero is what a free-fall window looks like, and |g| is
+  // the denominator below. Reporting 0 deg there is the least-wrong answer and
+  // avoids a NaN reaching the display.
+  if (mag < 1.0) return 0;
+  double c = mz / mag;
+  if (c > 1.0) c = 1.0;
+  if (c < -1.0) c = -1.0;  // guards the domain against rounding
+  const double deg = acos(c) * (180.0 / 3.14159265358979323846);
+  return clamp32(static_cast<int32_t>(deg + 0.5), 0, 180);
+}
+
+/// Samples the sensor task has produced since boot. Incremented, not derived,
+/// so the display can show that the acquisition task is alive even when every
+/// reading it produces is identical — which is exactly the case where the
+/// sensor has stopped answering.
+volatile uint32_t g_sampleCount = 0;
 
 // ---------------------------------------------------------------------------
 // Ring helpers
@@ -242,7 +342,7 @@ static size_t buildDiagDoc(char* out, size_t cap, void*) {
   v.bleClients = Comm::instance().clientCount();
   v.oledOk = Ui::instance().oledOk();
   v.watchdogResets = Power::instance().watchdogResets();
-  v.batteryMv = batteryMilliVolts(g_batteryAdc());
+  v.batteryMv = batteryMvCached();
   v.rssi = Comm::instance().rssi();
   portENTER_CRITICAL(&g_stateLock);
   v.accelI2cErrors = g_accel.errorCount();
@@ -526,7 +626,7 @@ static void handleParsedRequest(uint8_t type, json::Parser& p, const char* doc, 
       hv.chipId = g_chipId;
       hv.mac = g_mac;
       hv.name = g_name;
-      hv.batteryMv = batteryMilliVolts(g_batteryAdc());
+      hv.batteryMv = batteryMvCached();
       hv.batteryPct = hv.batteryMv ? batteryPercent(hv.batteryMv) : 255;
       hv.charging = g_charging();
       hv.uptimeMs = now;
@@ -587,6 +687,7 @@ static void handleParsedRequest(uint8_t type, json::Parser& p, const char* doc, 
       const bool isFlash = !strcmp(op, "FLASH_TEST");
       const bool isSelftest = !strcmp(op, "SELFTEST");
       const bool isTest = !strcmp(op, "TEST");
+      const bool isMode = !strcmp(op, "MODE");
 
       if (isArm || isDisarm) {
         g_sm.settings().armed = isArm;
@@ -611,8 +712,51 @@ static void handleParsedRequest(uint8_t type, json::Parser& p, const char* doc, 
         sendAck(proto::kTypeCommand, 0, "COMMAND", op);
         return;
       }
+      if (isMode) {
+        // {"op":"MODE","mode":"DEMO"|"NORMAL"} or {"op":"MODE"} to query.
+        uint8_t want = g_demo.mode();
+        char mode[16] = {0};
+        if (p.member(p.root(), "mode", v) && v.kind == json::Val::kStr &&
+            p.str(v, mode, sizeof(mode))) {
+          if (!strcmp(mode, "DEMO")) {
+            want = kModeDemo;
+          } else if (!strcmp(mode, "NORMAL")) {
+            want = kModeNormal;
+          } else if (!strcmp(mode, "DIAG") || !strcmp(mode, "DIAGNOSTIC")) {
+            want = kModeDiag;
+          } else {
+            // Refused rather than coerced. Silently treating an unknown mode
+            // string as NORMAL would ACK a command the caller believes it
+            // issued, and the node would quietly be in the other mode.
+            sendError(2 /* BAD_ARGS */, "mode must be NORMAL, DEMO or DIAG");
+            return;
+          }
+          g_demo.setMode(want);
+          if (want == kModeDiag) g_health.reset();
+        }
+        // Echo the mode that is actually in force, whatever was asked for. A
+        // caller that gets back a mode it did not set can act on it; a caller
+        // that gets back a bare ACK has to guess. Sent as a COMMAND payload
+        // because that is the only unsolicited-on-request frame type that
+        // carries a body here, and the app is already parsing it.
+        static char doc[96];
+        static uint8_t frame[kFrameBufSize];
+        const int len = snprintf(doc, sizeof(doc),
+                                 "{\"op\":\"MODE\",\"mode\":\"%s\",\"triggers\":%lu}",
+                                 runModeName(g_demo.mode()),
+                                 static_cast<unsigned long>(g_demo.triggerCount()));
+        if (len > 0) {
+          const size_t fn = proto::encodeJson(frame, sizeof(frame), proto::kTypeCommand,
+                                              doc, static_cast<size_t>(len));
+          if (fn) Comm::instance().notifyCtrlFrameNow(frame, fn);
+        }
+        sendAck(proto::kTypeCommand, 0, "COMMAND", op);
+        return;
+      }
       if (isResetStats) {
         g_detector.resetStats();
+        g_demo.resetStats();
+        Ui::instance().clearTrace();
         sendAck(proto::kTypeCommand, 0, "COMMAND", op);
         return;
       }
@@ -692,6 +836,14 @@ static void sensorTask(void*) {
     s.tMs = now;
     pushSample(s);
 
+    // The live trace is fed here, at the full 50 Hz, and not from uiTask. An
+    // impact peak is about 40 ms wide; a trace sampled at the 10 Hz redraw rate
+    // catches it one time in five and draws a small bump for what was a 5 g
+    // event. Someone shaking the node to watch the display would conclude the
+    // detector was broken.
+    Ui::instance().pushTrace(g_pipeline.rawMagMg());
+    g_sampleCount++;
+
     // The detector needs a 20 ms cadence, not a 20 ms delay, so the wake time is
     // computed from the previous wake. A drift-corrected loop: adding vTaskDelay
     // to the *work* time accumulates every I2C stall into permanent lag.
@@ -715,7 +867,7 @@ static void detectTask(void*) {
             t.peakMg = d.magMg;
       t.score = d.score;
       t.state = g_sm.state();
-      t.batteryPct = batteryPercent(batteryMilliVolts(g_batteryAdc()));
+      t.batteryPct = batteryPctCached();
       t.flags = g_sm.flags(false, false, false, Ui::instance().oledOk(),
                            Ui::instance().buttonDown(), g_charging());
       pushTelemetry(t);
@@ -724,6 +876,35 @@ static void detectTask(void*) {
         const saas::Transition tr = g_sm.trip(s.tMs);
         if (tr.legal) queueEvent(proto::kEvAccidentDetected, d, d.score);
         if (tr.to == proto::kStatePending) Ui::instance().chirp();
+      }
+
+      // Sensor-health evidence, accumulated in every mode. Fed here rather than
+      // from uiTask so it sees the same unfiltered sample the detector does, at
+      // the full 50 Hz: a diagnostic that sampled at the display rate could miss
+      // the one-second window in which a frozen bus is distinguishable from a
+      // still sensor.
+      g_health.feed(s.tMs, g_pipeline.rawMagMg(), (s.flags & kSfSw420) != 0,
+                    digitalRead(kPinSw420) == HIGH, (s.flags & kSfSensorOk) != 0,
+                    g_accel.present());
+
+      // The demo trigger runs *after* the real detector and cannot suppress it.
+      // In NORMAL it returns false and costs one comparison; in DEMO it raises
+      // the same event through the same state machine, so a demonstration
+      // exercises the real BLE and app path rather than a parallel mock of it.
+      if (g_demo.feed(s.tMs, s.magMg, (s.flags & kSfSw420) != 0, (s.flags & kSfSensorOk) != 0)) {
+        const saas::Transition tr = g_sm.trip(s.tMs);
+        if (tr.legal) {
+          // A plausible-looking impact, not a bare flag: the app's event screen
+          // has a chart and a magnitude, and an event with zeros in it would
+          // demonstrate the transport while showing nothing about the detector.
+          saas::Decision demo = d;
+          demo.score = d.score > 70 ? d.score : 82;
+          demo.magMg = static_cast<uint16_t>(
+              s.magMg > 65535 ? 65535 : (s.magMg < 0 ? 0 : s.magMg));
+          demo.peakAccMg = demo.magMg;
+          queueEvent(proto::kEvAccidentDetected, demo, demo.score);
+        }
+        Ui::instance().chirp();
       }
     }
     vTaskDelayUntil(&last, pdMS_TO_TICKS(kSensorPeriodMs));
@@ -745,16 +926,163 @@ static void uiTask(void*) {
     UiModel m{};
     m.state = g_sm.state();
     m.uptimeMs = now;
-    m.batteryMv = batteryMilliVolts(g_batteryAdc());
-    m.batteryPct = m.batteryMv ? batteryPercent(m.batteryMv) : 255;
+    m.batteryMv = batteryMvCached();
+    m.batteryPct = m.batteryMv ? batteryPercent(static_cast<uint16_t>(m.batteryMv)) : 255;
     m.charging = g_charging();
     m.sw420 = g_pipeline.sw420Level();
     m.sosHeld = Ui::instance().buttonDown();
+
+    // The one physical button, two meanings.
+    //
+    //   click  (< kSosHoldMs)  ->  toggle NORMAL <-> DEMO
+    //   hold   (>= kSosHoldMs) ->  manual SOS
+    //
+    // This inverts an earlier mapping that had it the other way round, on the
+    // grounds that an emergency should not need a 2-second commitment while
+    // mode-switching is a thing you do deliberately and can watch the screen to
+    // confirm. Holding is still required for SOS, because the alternative — SOS
+    // on any press — means a single accidental touch raises an emergency call
+    // about a parked car.
+    //
+    // The two are checked in this order and cannot collide. sosLongPressed()
+    // latches on the frame the hold threshold is crossed, while the button is
+    // still down; sosPressed() only fires on *release*, and by then the release
+    // is the far edge of a long press. Ui is built so that a press that was
+    // promoted to a long press never also produces a click.
+    if (Ui::instance().sosLongPressed()) {
+      const saas::Transition tr = g_sm.dispatch(Trigger::kManualSos, now);
+      if (tr.legal) {
+        saas::Decision d{};
+        d.score = 100;
+        queueEvent(tr.emit == saas::proto::kEvAlertConfirmed
+                       ? proto::kEvAlertConfirmed
+                       : proto::kEvManualSos,
+                   d, d.score);
+        Ui::instance().chirp();
+        Ui::instance().showBanner(Banner::kSos);
+        Serial.printf("SOS (hold %lums) -> %s\n",
+                      static_cast<unsigned long>(Ui::instance().lastHeldMs()),
+                      proto::stateName(tr.to));
+      } else {
+        // BOOT and FAULT have no SOS row on purpose — there is nothing
+        // meaningful to dispatch while the detector is not trustworthy.
+        Ui::instance().chirp();
+        Serial.printf("SOS ignored from %s\n", proto::stateName(g_sm.state()));
+      }
+    } else if (Ui::instance().sosPressed()) {
+      // Cycle NORMAL -> DEMO -> DIAGNOSTIC -> NORMAL.
+      //
+      // A cycle rather than a two-way toggle because the three modes answer three
+      // different questions and someone holding a node down a cable wants the
+      // diagnostic one just as much as the demo one. It lands back on NORMAL
+      // after three clicks, so a node left on a bench does not need a fourth
+      // click to be safe.
+      const uint8_t next = (m.runMode == kModeNormal)  ? kModeDemo
+                           : (m.runMode == kModeDemo)  ? kModeDiag
+                                                        : kModeNormal;
+      g_demo.setMode(next);
+      Ui::instance().clearTrace();
+      Ui::instance().chirp();
+      // Entering DIAGNOSTIC starts a fresh check: reporting the previous mode's
+      // accumulated evidence as a diagnosis would be answering a question nobody
+      // asked yet.
+      if (next == kModeDiag) g_health.reset();
+      Ui::instance().showBanner(next == kModeDemo   ? Banner::kModeDemo
+                                 : next == kModeDiag ? Banner::kModeDiag
+                                                     : Banner::kModeNormal);
+      Serial.printf("click -> mode %s\n", runModeName(g_demo.mode()));
+    }
     m.muted = g_sm.mutedByClock(time(nullptr)) || m.state == proto::kStateMuted;
     m.score = g_detector.lastScore();
     m.speedKmh = static_cast<uint8_t>(g_detector.lastSpeedMilliKmh() / 1000);
     m.sensorOk = !g_sensorFault;
     m.accelPresent = g_accel.present();
+
+    // Live sensor readout. The raw axes, not the filtered ones: this is the
+    // "what is the part actually reading" view, and an impact peak is too short
+    // for the 5 Hz section to report honestly.
+    m.rawAxMg = static_cast<int16_t>(clamp32(g_pipeline.rawAxMg(), -32768, 32767));
+    m.rawAyMg = static_cast<int16_t>(clamp32(g_pipeline.rawAyMg(), -32768, 32767));
+    m.rawAzMg = static_cast<int16_t>(clamp32(g_pipeline.rawAzMg(), -32768, 32767));
+    m.rawMagMg = g_pipeline.rawMagMg();
+    m.tiltDeg = static_cast<int16_t>(tiltDegrees(g_pipeline.gravityX(),
+                                                 g_pipeline.gravityY(),
+                                                 g_pipeline.gravityZ()));
+    m.sampleCount = g_sampleCount;
+
+    // Run mode. Read across from the detect task; a torn read costs at most a
+    // stale demo counter on the display, never a missed or spurious trigger.
+    m.runMode = g_demo.mode();
+    m.demoShakeRun = g_demo.shakeRun();
+    m.demoTriggers = static_cast<uint16_t>(g_demo.triggerCount() > 0xFFFF
+                                               ? 0xFFFF
+                                               : g_demo.triggerCount());
+    m.demoPeakMagMg = g_demo.peakMagMg();
+    m.demoCooldownMs = g_demo.cooldownRemaining(now);
+    m.accelThresholdMg = g_detector.config().accelThresholdMg;
+    m.diagAccel = g_health.accel();
+    m.diagSw420 = g_health.sw420();
+    m.diagBus = g_health.bus();
+    m.diagReadFailures = g_health.readFailures();
+    m.diagSwToggles = g_health.sw420Toggles();
+
+    // The same numbers the OLED is drawing, as text. Gated on kSerialDataMs
+    // rather than every tick: uiTask runs at 10 Hz and Serial.printf blocks for
+    // the duration of the write, so printing every tick would put a visible
+    // notch in the display's own update rate.
+    static uint32_t lastSerialMs = 0;
+    if (now - lastSerialMs >= kSerialDataMs) {
+      lastSerialMs = now;
+      if (m.sensorOk && m.accelPresent) {
+        Serial.printf(
+            "%-6s %-7s t=%5us X%6.3f Y%6.3f Z%6.3f |a|=%6.3fg peak=%6.3fg"
+            " sw=%d sc=%3d n=%lu\n",
+            runModeName(m.runMode), proto::stateName(m.state), m.uptimeMs / 1000,
+            m.rawAxMg / 1000.0, m.rawAyMg / 1000.0, m.rawAzMg / 1000.0,
+            m.rawMagMg / 1000.0, m.demoPeakMagMg / 1000.0, m.sw420 ? 1 : 0,
+            m.score, static_cast<unsigned long>(g_sampleCount));
+        if (m.runMode == kModeDemo) {
+          // shakeRun is the count toward kDemoShakeHoldSamples, and it only
+          // advances while *both* sensors agree — so a reader watching it sit at
+          // zero can tell which sensor is not contributing without guessing.
+          Serial.printf("  DEMO  shake %u/%u  hits=%u  cooldown=%lums"
+                        "  (needs |a|>=%dmg AND SW-420)\n",
+                        m.demoShakeRun, kDemoShakeHoldSamples, m.demoTriggers,
+                        static_cast<unsigned long>(m.demoCooldownMs),
+                        static_cast<int>(kDemoShakeMagMg));
+        } else if (m.runMode == kModeDiag) {
+          Serial.printf(
+              "  DIAG  ADXL345 %-8s SW-420 %-8s BUS %-8s\n"
+              "        gravity=%s motion=%s |a|min=%ldmg max=%ldmg"
+              "  swEdges=%lu  readFails=%u/%u\n",
+              healthText(m.diagAccel), healthText(m.diagSw420), healthText(m.diagBus),
+              g_health.sawGravity() ? "yes" : "no",
+              g_health.sawMotion() ? "yes" : "no",
+              static_cast<long>(g_health.minMagMg()),
+              static_cast<long>(g_health.maxMagMg()),
+              static_cast<unsigned long>(g_health.sw420Toggles()),
+              static_cast<unsigned>(g_health.readFailures()),
+              static_cast<unsigned>(g_health.worstReadFailures()));
+        }
+      } else {
+        // The fault line, printed instead of the data rather than after it, so a
+        // node that is not reading its sensor is obviously not reading its sensor.
+        Serial.printf(
+            "%-6s %-7s t=%5us *** SENSOR FAULT *** %s"
+            " addr=0x%02X id=0x%02X failRuns=%u\n",
+            runModeName(m.runMode), proto::stateName(m.state), m.uptimeMs / 1000,
+            m.accelPresent ? "read failing" : "not found", g_accel.address(),
+            g_accel.deviceId(), static_cast<unsigned>(g_accel.consecutiveFailures()));
+        // Gravity is ~1 g on whichever axis the mount puts it on. Sitting far
+        // below that is the signature of a part that answers I2C but is not
+        // powered, or of a scaling mistake in the firmware — and those two look
+        // identical on the wire, so it is worth saying which is expected.
+        Serial.printf(
+            "        |a|=%.3fg  (a still node must read ~1.00g; near 0 means no"
+            " gravity, i.e. the part is not really powered)\n",
+            m.rawMagMg / 1000.0);
+      }
+    }
     m.calibrating = g_pipeline.calibrating();
     m.calibProgressPct = 0;
     m.eventUndelivered = Comm::instance().eventUndelivered();
@@ -771,6 +1099,13 @@ static void uiTask(void*) {
 static void sysTask(void*) {
   for (;;) {
     const uint32_t now = millis();
+
+    // The battery ADC is sampled here and nowhere else — see refreshBattery().
+    // kSysPeriodMs is the natural cadence: a LiPo divider cannot resolve a
+    // useful change faster than that, and the OLED and the BLE packets read
+    // this cache rather than the pin.
+    refreshBattery();
+
     // Countdown expiry: PENDING and SOS both escalate to ALARM here, so the
     // state machine never depends on a busy wait.
     const saas::Transition tr = g_sm.onTick(now);
@@ -783,42 +1118,85 @@ static void sysTask(void*) {
       }
     }
 
-    // Fault detection: too many consecutive I2C failures is a detached sensor,
-    // and a detector fed zeros will happily call every bump a crash.
-    static uint8_t consecutive = 0;
-    if (!g_accel.present()) {
-      if (consecutive < 200) consecutive++;
-    } else {
-      consecutive = 0;
+    // Fault detection, and leaving BOOT.
+    //
+    // Two bugs lived here and both are visible on a bench.
+    //
+    // 1. The state machine was never told the node had booted. `sensorsOk()` was
+    //    only reachable from the *recovery* branch of a fault transition, and
+    //    g_sensorFault starts false and stays false on a healthy node — so that
+    //    branch could never run. Every node sat in BOOT forever, the detector
+    //    never armed, and no event could ever be raised. Now the boot
+    //    completion is an explicit condition: a primed pipeline, a healthy
+    //    sensor, and a calibration that has finished.
+    //
+    // 2. The fault test was `!g_accel.present()`, and present() is fixed at
+    //    begin(). Unplugging the accelerometer from a running node therefore
+    //    changed nothing at all. It now watches consecutiveFailures(), which is
+    //    a runtime streak that a good read clears.
+    const bool sensorHealthy = g_accel.present() && g_accel.consecutiveFailures() < kSensorFaultFailRuns;
+    const bool calibrated = g_pipeline.primed() && !g_pipeline.calibrating();
+
+    // DIAGNOSTIC and DEMO both disarm the production detector. DEMO because a
+    // bench node must not page anyone from a road joint; DIAGNOSTIC because a
+    // health check that raises accidents is not a health check. The guarantee
+    // that matters is the one in modeCanRaiseEvents(), which the demo trigger
+    // consults before firing — this is the belt to that braces.
+    if (g_demo.mode() != kModeNormal) {
+      DetectorCfg dc = g_detector.config();
+      if (dc.armed) {
+        dc.armed = false;
+        g_detector.configure(dc);
+      }
     }
-    const bool fault = consecutive >= 100;
-    if (fault != g_sensorFault) {
-      g_sensorFault = fault;
+
+    if (sensorHealthy && calibrated && g_sm.state() == proto::kStateBoot) {
+      // Only out of BOOT. Calling this every tick would also yank the node out
+      // of MUTED, which is a user decision and not a sensor fact.
       g_stateSinceMs = now;
-      if (fault) {
+      g_sm.sensorsOk();
+    }
+
+    if (!sensorHealthy && g_accel.consecutiveFailures() >= kSensorFaultFailRuns) {
+      if (!g_sensorFault) {
+        g_sensorFault = true;
+        g_stateSinceMs = now;
         g_sm.dispatch(saas::Trigger::kFault, now);
         queueEvent(proto::kEvDeviceFault, saas::Decision{}, 0);
-      } else {
-        g_sm.sensorsOk();
       }
+    } else if (sensorHealthy && g_sensorFault) {
+      g_sensorFault = false;
+      g_stateSinceMs = now;
+      if (g_sm.state() == proto::kStateFault) g_sm.sensorsOk();
+    }
+
+    // Drain any pending calibration log (see g_calibLogPending). Done here
+    // rather than inline in the command handler so the ACK is sent immediately
+    // and the (potentially multi-frame) log does not delay it.
+    if (g_calibLogPending) {
+      g_calibLogPending = false;
+      streamCalibLog();
     }
 
     Power::instance().checkWatchdog(now);
     vTaskDelay(pdMS_TO_TICKS(kSysPeriodMs));
     Power::instance().feed(kWdSys);
-
-  // Drain any pending calibration log (see g_calibLogPending). Done here
-  // rather than inline in the command handler so the ACK is sent immediately
-  // and the (potentially multi-frame) log does not delay it.
-  if (g_calibLogPending) {
-    g_calibLogPending = false;
-    streamCalibLog();
-  }
   }
 }
 
 static void wdtTask(void*) {
   for (;;) {
+    // Feed its own slot first, then judge everyone else.
+    //
+    // It did not do this, and that is why the node rebooted roughly every
+    // kWatchdogTimeoutS seconds. `checkWatchdog` walks all kTaskSlots looking for
+    // one that has not been fed, and kWdWatchdog is a real slot with a real
+    // index — nothing exempts it. So five seconds after boot, the watchdog found
+    // its own slot stale and called ESP.restart(), in a loop, forever.
+    //
+    // The ordering matters: feed, then check. The reverse would work only by
+    // accident of the first iteration.
+    Power::instance().feed(kWdWatchdog);
     Power::instance().checkWatchdog(millis());
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -857,11 +1235,30 @@ void setup() {
   // wrong gravity baseline reports every corner as an orientation change.
   g_pipeline.beginCalibration(millis(), kBootCalibMs);
 
-  if (!accelOk || !oledOk) {
-    // Not fatal for BLE, but the UI shows NOMP and sysTask will raise a fault.
-    Serial.printf("boot: adxl345=%d addr=0x%02X oled=%d\n", accelOk,
-                  g_accel.address(), oledOk);
+  // Always. A node that hangs in BOOT used to be undiagnosable from the serial
+  // monitor, because the only thing it printed was a repeating data line and the
+  // only boot line came out on the failure path.
+  Serial.println();
+  Serial.println(F("=== SAAS node boot ==="));
+  Serial.printf("  accelerometer : %s  addr=0x%02X  DEVID=0x%02X  range=+/-16g  odr=100Hz\n",
+                accelOk ? "found" : "NOT FOUND", g_accel.address(),
+                accelOk ? g_accel.deviceId() : 0);
+  Serial.printf("  oled          : %s\n", oledOk ? "found" : "NOT FOUND");
+  Serial.printf("  run mode      : %s  (always NORMAL on boot; click SOS to toggle)\n",
+                runModeName(g_demo.mode()));
+  Serial.printf("  boot calib    : %ums\n", static_cast<unsigned>(kBootCalibMs));
+  Serial.println(F("  button        : click = mode, hold 800ms = SOS"));
+  if (!accelOk) {
+    // The single most useful line on a bench. Without it the natural reaction to
+    // a node that reports 0.1 g is to suspect the firmware's scaling.
+    Serial.println(F(
+        "  !! no accelerometer: check VS (3.3V), GND, and SDA/SCL (21/22)."));
+    Serial.println(F(
+        "     an unpowered ADXL345 still answers I2C on some breakouts, so DEVID"));
+    Serial.println(F("     can read 0xE5 while the data registers read zero."));
   }
+  Serial.println(F("  live |a| and raw axes print below; OLED shows the same"));
+  Serial.println();
 
   xTaskCreatePinnedToCore(sensorTask, "sensor", kStackSensor, nullptr, kPrioSensor, &g_handle[kWdSensor], 1);
   xTaskCreatePinnedToCore(detectTask, "detect", kStackDetect, nullptr, kPrioDetect, &g_handle[kWdDetect], 1);
