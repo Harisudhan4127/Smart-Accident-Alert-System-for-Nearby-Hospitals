@@ -47,6 +47,7 @@ This is a **prototype**. It is not a certified emergency-response system, and
 | 11 | [Deployment](11-deployment.md) | Flashing the node, running the app, deploying the backend, and CI |
 | 12 | [API reference](12-api-reference.md) | The repository and datasource APIs, the Firestore schema, and the Cloud Functions |
 | 13 | [Troubleshooting](13-troubleshooting.md) | Symptoms → cause → fix, ordered by how often each actually happens |
+| 14 | [Permissions](14-permissions.md) | Every permission the app can request, why it needs it, and the exact moment it asks |
 
 ### Reading order, by audience
 
