@@ -10,6 +10,10 @@ SHELL := /bin/bash
 # Paths. `APP` is the Flutter project; `FIRMWARE` is the Arduino sketch.
 APP      := app
 FIRMWARE := firmware/SmartAccidentAlert
+# Host-side unit tests. Deliberately outside $(FIRMWARE): the Arduino build
+# compiles every .cpp in the sketch directory, so a test with a main() next to
+# the .ino ends up linked into the firmware.
+FWTEST   := firmware/test
 TOOLS    := tools/protocol
 BACKEND  := backend
 
@@ -24,6 +28,11 @@ FQBN ?= esp32:esp32:esp32
 # Deterministic version stamp, so a build is traceable to a source commit.
 FW_VERSION ?= 1.0.0
 BUILD_DATE  = $(shell date -u +%Y%m%d)
+
+# Scratch output for the host test binaries. Kept out of the source directories on
+# purpose: the firmware tree is an Arduino sketch, and a stray .cpp with a main()
+# in it would be compiled into the firmware by the IDE.
+BUILD ?= build
 
 BLUE := \033[0;34m
 GREEN := \033[0;32m
@@ -83,10 +92,43 @@ test-protocol: ## Run the protocol conformance suite
 	@$(call require,node,"Install Node 18+ from https://nodejs.org")
 	cd $(TOOLS) && node --test 'test/*.mjs'
 
+## Host tests for the firmware logic that has no Arduino dependency. These are
+## the tests that can reach the fault paths: a detached sensor and a bus that
+## froze mid-shake are not reproducible by shaking a node on a desk.
+HOST_TEST_BIN := $(BUILD)/host
+.PHONY: test-firmware-host
+test-firmware-host: ## Compile and run the firmware's host-side unit tests
+	@$(call require,g++,"Install a C++17 compiler")
+	@mkdir -p $(HOST_TEST_BIN)
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -I$(FIRMWARE) \
+		-o $(HOST_TEST_BIN)/demomode \
+		$(FIRMWARE)/demomode.cpp $(FWTEST)/demomode_test.cpp
+	@$(HOST_TEST_BIN)/demomode
+	@echo
+	# The accelerometer conversion needs json.cpp for two of its symbols, so the
+	# test links the same trio the firmware does.
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -I$(FIRMWARE) \
+		-o $(HOST_TEST_BIN)/scale \
+		$(FIRMWARE)/sensors.cpp $(FIRMWARE)/json.cpp $(FIRMWARE)/protocol.cpp \
+		$(FWTEST)/scale_test.cpp
+	@$(HOST_TEST_BIN)/scale
+	@echo
+	# power.cpp guards its ESP.restart() behind #if defined(ARDUINO), so the
+	# host build gets the decision logic without the side effect.
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -I$(FIRMWARE) \
+		-o $(HOST_TEST_BIN)/watchdog \
+		$(FIRMWARE)/power.cpp $(FWTEST)/watchdog_test.cpp
+	@$(HOST_TEST_BIN)/watchdog
+	@echo
+	$(CXX) -std=c++17 -Wall -Wextra -Werror -I$(FIRMWARE) \
+		-o $(HOST_TEST_BIN)/sensordiag \
+		$(FIRMWARE)/sensordiag.cpp $(FWTEST)/sensordiag_test.cpp
+	@$(HOST_TEST_BIN)/sensordiag
+
 ## ── tests ────────────────────────────────────────────────────────────────────
 
 .PHONY: test
-test: test-protocol test-app ## Run every automated test
+test: test-protocol test-firmware-host test-app ## Run every automated test
 
 .PHONY: test-app
 test-app: ## Run the Flutter unit + widget tests
