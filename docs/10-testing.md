@@ -14,21 +14,68 @@ What is tested, what is not, and how to run it.
 
 ---
 
-## The three test layers
+## The four test layers
 
 | Layer | Runner | Count | Needs hardware? |
 | --- | --- | --- | --- |
 | Protocol conformance | `node --test` | 138 | no |
+| Firmware host unit | `g++` + `make test-firmware-host` | 159 checks | no |
 | Dart unit + conformance | `flutter test` | 211 | no |
 | Hardware-in-the-loop | manual + `DIAG` | see below | **yes** |
 
 ```bash
-make test              # layers 1 and 2
-make test-protocol     # layer 1 alone (~4 s, no SDK needed)
-make test-app          # layer 2 alone
-make verify            # lint + both, what CI runs
-make doctor            # what is installed on this machine
+make test                # layers 1, 2 and 3
+make test-protocol       # layer 1 alone (~4 s, no SDK needed)
+make test-firmware-host  # layer 2 alone (a few seconds, no SDK needed)
+make test-app            # layer 3 alone
+make verify              # lint + all, what CI runs
+make doctor              # what is installed on this machine
 ```
+
+### `firmware/test/` — 159 checks across four suites
+
+Four suites, 159 checks, all on the host. Each exists because of a bug that
+shipped, or of a hardware fault that a bench test cannot produce on purpose.
+
+**`demomode_test.cpp`** — the DEMO trigger's timing logic, which has no Arduino
+dependency. The cases that matter are the ones you cannot produce on purpose with
+a node on a desk:
+
+| Case | Why it is a test and not a bench check |
+| --- | --- |
+| A sensor that stops answering, feeding 5000 mg forever | A dead bus reads as a constant. A constant must not be mistaken for a shake — that is the whole difference between a SENSOR fault and a working node. |
+| A fault arriving mid-shake, between two healthy samples | The 3-sample hold window must not complete across a gap. A window that survives a dropped sample would fire on two samples, not three. |
+| A mode change with a shake half-primed | Switching to DEMO must not inherit a partial run, or the node fires on motion that happened before DEMO existed. |
+| 6 s of continuous shaking | Must fire exactly **twice** — once per 5 s cooldown. Shaking continuously and getting 300 events would fill the BLE queue with undelivered alerts. |
+| An unrecognised mode value | Must resolve to NORMAL. "No defined mode" is a worse outcome than either mode. |
+
+**`scale_test.cpp`** (10 checks) — **1 g is 1 g.** The firmware was configured for
+±16 g and scaled the output with the ±2 g factor, so every reading was 8× too
+small and a still node reported 0.12 g. Nothing caught it, because every detector
+threshold is far above 0.12 g: the node simply never scored, which on a display
+is indistinguishable from a healthy idle node. Also pins sign symmetry (a broken
+sign bit inverts whichever axis carries gravity on a face-down mount), that the 3
+padding bits do not change the reading, and monotonicity.
+
+**`sensordiag_test.cpp`** (52 checks) — the DIAGNOSTIC verdicts. The cases here
+are the ones that cost the most bench time, and that cannot be produced on purpose
+without a soldering iron: an ADXL345 whose `VS` is unconnected (it answers I²C and
+reads 0.1 g), a bus that has gone open (every read succeeds, the value is
+constant, and a bus-error count sees nothing), and an SW-420 that has simply never
+been tapped. Also pins that an untapped switch is `??` UNPROVEN rather than
+`XX` — calling a correctly wired node broken until someone knocks it is how people
+learn to ignore a diagnostic display.
+
+**`watchdog_test.cpp`** (21 checks) — the watchdog restarted the node every 5 s,
+because `wdtTask` never fed its own slot and `checkWatchdog` found itself stale.
+Asserts the slot ids and the critical set **by name**: the first version of the
+predicate carried its own index numbers and said "3 is sys" when 3 is `ui`, so the
+display task was allowed to reboot the node and the housekeeping task was not.
+One enum in `power.h` is now shared by the feeder, the checker and this test.
+
+`firmware/test/` sits outside the sketch directory deliberately: the Arduino
+build compiles and links every `.cpp` in the sketch folder, so a `main()` next to
+the `.ino` would be pulled into the firmware image.
 
 ---
 

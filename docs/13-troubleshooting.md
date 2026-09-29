@@ -26,6 +26,70 @@ Symptom → cause → fix. Ordered by how often each one actually happens.
 The serial monitor is authoritative here. If it prints a boot banner, the
 firmware is alive and the problem is display-only.
 
+### `|a|` is near zero, or the node stays in `BOOT`
+
+Both are the same fault wearing two hats, and both are worth reading together.
+
+```
+NORMAL  BOOT    t=    3s  X  0.003 Y  0.097 Z -0.066  |a|=  0.117g  ...
+```
+
+`DEVID` reads `0xE5`, so the part *answers* — and then reports a tenth of a g.
+Three different things produce that, and they are distinguishable:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `\|a\|` ≈ 0.1 g, node stuck in `BOOT` | **The part is not actually powered.** Several ADXL345 breakouts answer I²C from the regulator's standby rail while `VS` is unconnected, so `DEVID` is valid and the data registers read nothing. | Measure `VS` to `GND` while the node runs. It should be 3.3 V. Check the `VS` pin specifically, not just the header. |
+| `\|a\|` ≈ 0.1 g but scaled right elsewhere | Firmware scaling wrong for the configured range | `adxlMilliTenthsPerLsb` must follow the range: ±2 g → 3.9 mg/LSB, ±4 g → 7.8, ±8 g → 15.6, **±16 g → 31.2**. FULL_RES fixes the *count* (1024), not the mass per count. |
+| `\|a\|` jumps around ±1 g and settles | Working; that is the noise floor of a node on a desk | Nothing. `make test-firmware-host` asserts 1 g → 1000 mg. |
+
+**Why `BOOT` is the symptom.** The node only leaves `BOOT` once the pipeline is
+primed and the sensor is healthy, and it will not arm a detector it has no
+reason to trust. A node that reads 0.1 g never satisfies the sensor health check,
+so it stays in `BOOT` and never scores — which is correct behaviour being
+reported in a way that looks like a hang. Look for the `*** SENSOR FAULT ***`
+line: the firmware prints it in place of the data line, so a node with no working
+sensor cannot be mistaken for a node idling quietly.
+
+### The node reboots every few seconds
+
+`DIAG.watchdogResets` counts them, and they survive a soft reset through
+`RTC_NOINIT_ATTR` — so if the serial monitor shows a fresh boot banner every few
+seconds with no other explanation, that counter is the thing to read.
+
+The cause that actually shipped: `wdtTask` never fed **its own** watchdog slot.
+`checkWatchdog` walks all six slots looking for one that has not been fed, and the
+watchdog's own slot is a real slot with a real index — nothing exempts it. So
+five seconds after every boot the watchdog found itself stale and called
+`ESP.restart()`, forever. Every other test passed; the firmware compiled; the
+node looked like it was running.
+
+That class of bug is now pinned by `firmware/test/watchdog_test.cpp`, which
+asserts the slot ids and the critical set by name.
+
+**A late display or radio task no longer reboots the node.** `kWatchdogCritical()`
+in `power.h` restricts restarts to the sensor, detect, sys and watchdog tasks —
+the ones whose liveness *is* the safety property. A slow SSD1306 push used to be
+able to reset a node that was detecting perfectly well, destroying the trace, the
+run mode and the armed state while the vehicle was moving. UI and BLE lateness is
+still tracked and shows up in DIAG.
+
+### `adc_oneshot ... read fail` in the log
+
+```
+E (7532) adc_oneshot: adc_oneshot_get_calibrated_result(330): read fail
+```
+
+The ADC oneshot driver is not reentrant. This appears when two cores call
+`analogReadMilliVolts` at once — the detector at 50 Hz and the display at 10 Hz
+were both sampling the battery divider, ~960 reads/second, and colliding.
+
+The firmware now has one owner: `sysTask` samples at `kSysPeriodMs` and everyone
+else reads the cache. If you add a reading, add it to `batteryMvCached()`'s
+readers, not to the ADC. If the error appears again, something has acquired a
+second caller — that is what it means now, and it is worth finding rather than
+filtering out of the log.
+
 ### Everything resets when the buzzer fires
 
 **A brownout.** The buzzer draws ~30 mA; on a weak power source that can pull
