@@ -373,11 +373,51 @@ and the app can de-duplicate a re-delivered event. This is what makes event retr
 | `MUTE` | suppress buzzer for `untilUnixS` |
 | `FLASH_TEST` | blink LEDs for wiring verification |
 | `SELFTEST` | full hardware self-test, replies with `DIAG` |
-| `RESET_STATS` | clear peak/counters |
+| `RESET_STATS` | clear peak/counters, and the live trace |
+| `MODE` | set or query the run mode: `NORMAL`, `DEMO` or `DIAG` |
 
 ```json
 { "op": "CONFIRM", "eventId": "8f3a1c22" }
 ```
+
+#### `MODE`
+
+```json
+{ "op": "MODE", "mode": "DEMO" }   // set; "DIAG" is also accepted
+{ "op": "MODE" }                   // query
+```
+
+Replies with an `ACK` and a second `COMMAND` carrying the mode **actually in
+force**, not the one that was asked for:
+
+```json
+{ "op": "MODE", "mode": "DEMO", "triggers": 3 }
+```
+
+The reply is unconditional, so a client that asked can learn the real state
+instead of assuming its request took. An unrecognised `mode` string is refused
+with `BAD_ARGS` rather than coerced — an `ACK` for a mode the node did not enter
+is worse than an error, because the caller has no way to tell.
+
+`DIAG` is a **diagnostic** mode: it reports per-sensor health on the OLED and the
+serial monitor, and it never raises an event. It also disarms the production
+detector, so a node on a bench cannot page anyone from a road joint.
+
+**`DEMO` is never entered implicitly.** A node always boots in `NORMAL`. The
+alternative — booting in whatever mode was last set — means a bench session can
+leave a car raising simulated alerts about a car that was fine, and a demo event
+is byte-for-byte the same `ACCIDENT_DETECTED` as a real one. In `DEMO` the node
+raises a genuine event through the genuine state machine, so the whole path
+above it is exercised; the only difference is *what caused it*. A `DEMO` node
+must not be relied on to detect anything.
+
+**The one physical button has two meanings.** A *click* (released before 800 ms)
+cycles `NORMAL` → `DEMO` → `DIAG` → `NORMAL`, so the mode is reachable with no
+phone attached. A *hold* (800 ms or longer) is a manual SOS. The two cannot
+collide: the hold is latched while the button is still down, and the release of a
+promoted-to-hold press is suppressed, so one gesture does exactly one thing.
+Holding is required for SOS deliberately — SOS on any press would mean a single
+accidental touch raises an emergency call about a parked car.
 
 ### 6.8 `CALIBRATE` (phone → device, `0x05`)
 

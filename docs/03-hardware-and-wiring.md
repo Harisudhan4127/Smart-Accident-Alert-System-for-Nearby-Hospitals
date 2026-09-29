@@ -156,13 +156,29 @@ fastest:
 2. **I²C alone.** Run with `SAAS_ENABLE_OLED=0` and the buzzer disabled. Get a
    clean ADXL345 stream on the serial monitor first. Two devices on one bus fail
    for different reasons than one device on a broken bus. The boot line prints
-   the address it settled on — `boot: adxl345=1 addr=0x53 oled=1` — which tells
-   you immediately whether the part answered and where.
-3. **SW-420 by hand.** Tap the module and watch GPIO 27 on the monitor. If the
+   the address it settled on — `boot: adxl345=1 addr=0x53 oled=1 mode=NORMAL` —
+   which tells you immediately whether the part answered, where, and in which
+   mode the node came up.
+3. **Look at the OLED before touching anything.** It draws live sensor data
+   continuously: the run mode, the three raw axes in g, |a|, the detector score
+   and the SW-420 level, with a rolling |a| trace along the bottom panel. This is
+   the fastest way to confirm the accelerometer is *live* rather than merely
+   present — a stuck bus freezes the trace flat instead of showing noise around
+   1 g — and the `MODE:` banner in the top-left tells you which mode you are in
+   before you start shaking anything.
+4. **DEMO, then shake it.** **Click** the SOS button (a press shorter than
+   800 ms), or send `COMMAND {"op":"MODE","mode":"DEMO"}`. The whole screen
+   animates and reads `DEMO — shake = simulated`. Now shake the node: |a| spikes
+   on the trace, the buzzer chirps, and a real `ACCIDENT_DETECTED` goes out over
+   BLE. This exercises the entire path — detector, state machine, event queue,
+   BLE, app — from a desk, with no car. Click again to return to `NORMAL`; a
+   power cycle returns to `NORMAL` regardless, by design.
+   Holding the button for 800 ms instead sends a manual SOS, so the two gestures
+   are distinguishable by feel and by the screen.
+5. **SW-420 by hand.** Tap the module and watch GPIO 27 on the monitor. If the
    pin does not go high, the pot or the wiring is wrong and nothing downstream
-   will tell you.
-4. **Then the OLED, then the buzzer, then the button.**
-5. **Then BLE.** The firmware advertises as `SAAS-A1B2C3D4`; a phone that cannot
+   will tell you. The OLED shows the same thing as `SW1` / `SW0` on line 2.
+6. **Then BLE.** The firmware advertises as `SAAS-A1B2C3D4`; a phone that cannot
    see it is a 2.4 GHz problem, not a protocol problem.
 
 ## Known discrepancies with `firmware/README.md`
