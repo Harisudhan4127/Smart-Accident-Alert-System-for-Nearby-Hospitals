@@ -199,6 +199,15 @@ class FakeBleTransport implements BleTransport {
   }
 
   @override
+  Future<bool> ensureReady() async {
+    // There is no OS permission dialog in the simulator, so this always succeeds
+    // unless the caller has asked for a scenario where the radio is off. Keeping
+    // it in the interface means the splash screen runs the *same* code path
+    // against the fake as against hardware, which is the point of the interface.
+    return adapterStatus.isUsable;
+  }
+
+  @override
   Stream<BlePeripheralInfo> scan({
     Duration timeout = const Duration(seconds: 10),
     bool requireServiceUuid = true,

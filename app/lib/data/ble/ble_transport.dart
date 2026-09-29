@@ -235,6 +235,23 @@ abstract class BleTransport {
   /// Adapter status changes.
   Stream<BleAdapterStatus> get adapterStatusStream;
 
+  /// Brings the radio to a usable state as far as it can, and reports whether it
+  /// got there.
+  ///
+  /// This is *not* a permission request, and that distinction matters.
+  /// `flutter_blue_plus` asks the OS for BLUETOOTH_SCAN/CONNECT itself, inside
+  /// [scan] — there is no separate public API to call, and a first attempt to
+  /// discover that by inventing one cost a build. So the only thing the app can
+  /// usefully do up front is switch the radio on, which is a different operation
+  /// with a different failure mode: Android 13+ shows a system dialog for it, and
+  /// the user can decline.
+  ///
+  /// Why bother at the splash at all, then, if [scan] would prompt anyway? Because
+  /// the splash is where the app decides whether to block. Finding out here that
+  /// the radio is off turns "the app is broken" into "turn Bluetooth on", and it
+  /// gives the UI something to offer a button for.
+  Future<bool> ensureReady();
+
   /// The currently connected peripheral, or `null`.
   BlePeripheral? get connected;
 

@@ -33,7 +33,20 @@ import '../../domain/entities/geo_point.dart';
 /// Supplies the phone's position.
 abstract class LocationDatasource {
   /// Ask for the location permission, showing a rationale if needed.
+  ///
+  /// **Never call this at app launch.** It shows an OS dialog, and the best
+  /// moment for that is when the user is about to find out what location is for —
+  /// an accident alert. See `currentPermission` for the read-only check.
   Future<LocationPermissionOutcome> ensurePermission();
+
+  /// What the permission state is *right now*, without prompting.
+  ///
+  /// Separate from [ensurePermission] because the two are used in completely
+  /// different places: a pre-flight screen needs to *report* the state so it can
+  /// tell the user what will be asked and when, and prompting from there is what
+  /// makes an app's permission dialogs feel arbitrary. Every call site that only
+  /// wants to know uses this one.
+  Future<LocationPermissionOutcome> currentPermission();
 
   /// The best position available right now.
   ///
@@ -59,29 +72,13 @@ enum LocationPermissionOutcome {
   unavailable,
 }
 
-/// `geolocator` implementation.
-class GeolocatorDatasource implements LocationDatasource {
-  GeolocatorDatasource({AppLogger? log}) : _log = log ?? AppLogger();
-
-  final AppLogger _log;
-
-  /// Refined fixes, published while a caller is watching.
-  ///
-  /// A broadcast controller so [watch] has no listener-count coupling with
-  /// [currentPosition]; the background refresh and the watch feed are the same
-  /// stream, so a position learned by one benefits the other.
-  final StreamController<GeoPoint> _refined = StreamController<GeoPoint>.broadcast();
-
-  @override
-  Future<LocationPermissionOutcome> ensurePermission() async {
-    if (!await geo.Geolocator.isLocationServiceEnabled()) {
-      return LocationPermissionOutcome.unavailable;
-    }
-    geo.LocationPermission permission = await geo.Geolocator.checkPermission();
-    if (permission == geo.LocationPermission.denied) {
-      permission = await geo.Geolocator.requestPermission();
-    }
-    return switch (permission) {
+/// Maps a plugin permission onto our outcome enum.
+///
+/// Shared by [currentPermission] and [ensurePermission] so the two can never
+/// report different answers for the same state — which would show up as a splash
+/// screen saying "granted" and an alert flow refusing to ask.
+LocationPermissionOutcome locationOutcomeFor(geo.LocationPermission permission) =>
+    switch (permission) {
       geo.LocationPermission.always ||
       geo.LocationPermission.whileInUse =>
         LocationPermissionOutcome.granted,
@@ -95,6 +92,42 @@ class GeolocatorDatasource implements LocationDatasource {
       geo.LocationPermission.unableToDetermine =>
         LocationPermissionOutcome.unavailable,
     };
+
+/// `geolocator` implementation.
+class GeolocatorDatasource implements LocationDatasource {
+  /// The read-only check, so the splash screen can report without prompting.
+  static LocationPermissionOutcome _outcomeFor(geo.LocationPermission p) =>
+      locationOutcomeFor(p);
+
+  GeolocatorDatasource({AppLogger? log}) : _log = log ?? AppLogger();
+
+  final AppLogger _log;
+
+  /// Refined fixes, published while a caller is watching.
+  ///
+  /// A broadcast controller so [watch] has no listener-count coupling with
+  /// [currentPosition]; the background refresh and the watch feed are the same
+  /// stream, so a position learned by one benefits the other.
+  final StreamController<GeoPoint> _refined = StreamController<GeoPoint>.broadcast();
+
+  @override
+  Future<LocationPermissionOutcome> currentPermission() async {
+    if (!await geo.Geolocator.isLocationServiceEnabled()) {
+      return LocationPermissionOutcome.unavailable;
+    }
+    return _outcomeFor(await geo.Geolocator.checkPermission());
+  }
+
+  @override
+  Future<LocationPermissionOutcome> ensurePermission() async {
+    if (!await geo.Geolocator.isLocationServiceEnabled()) {
+      return LocationPermissionOutcome.unavailable;
+    }
+    geo.LocationPermission permission = await geo.Geolocator.checkPermission();
+    if (permission == geo.LocationPermission.denied) {
+      permission = await geo.Geolocator.requestPermission();
+    }
+    return _outcomeFor(permission);
   }
 
   @override
@@ -206,8 +239,16 @@ class FakeLocationDatasource implements LocationDatasource {
 
   GeoPoint? _position;
 
-  /// What [ensurePermission] reports.
+  /// What both [ensurePermission] and [currentPermission] report.
+  ///
+  /// One field, because a fake that could answer differently to the two queries
+  /// would let a test pass on a splash screen and fail on the alert flow.
   LocationPermissionOutcome outcome;
+
+  /// How many times [ensurePermission] was called — i.e. how many OS dialogs the
+  /// app would have shown. A test asserting this is 0 is asserting that nothing
+  /// prompts at launch, which is the property that was lost.
+  int promptCount = 0;
 
   final StreamController<GeoPoint> _controller =
       StreamController<GeoPoint>.broadcast();
@@ -223,7 +264,13 @@ class FakeLocationDatasource implements LocationDatasource {
   }
 
   @override
-  Future<LocationPermissionOutcome> ensurePermission() async => outcome;
+  Future<LocationPermissionOutcome> ensurePermission() async {
+    promptCount++;
+    return outcome;
+  }
+
+  @override
+  Future<LocationPermissionOutcome> currentPermission() async => outcome;
 
   @override
   Future<Result<GeoPoint?>> currentPosition() async {

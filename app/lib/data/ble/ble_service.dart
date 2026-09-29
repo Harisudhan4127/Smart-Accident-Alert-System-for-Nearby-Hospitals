@@ -62,6 +62,37 @@ class BleService implements BleTransport {
   }
 
   @override
+  Future<bool> ensureReady() async {
+    // The runtime BLE *permission* is requested by the plugin inside scan(); it
+    // is not separately callable. What is callable — and what the splash screen
+    // needs in order to say something useful — is switching the radio on.
+    if (_adapterState == fbp.BluetoothAdapterState.unavailable) return false;
+    if (_adapterState == fbp.BluetoothAdapterState.on) return true;
+
+    try {
+      // No-op if the radio is already on. On Android 13+ this can raise the
+      // "turn on Bluetooth?" system dialog, and the user may decline it — which
+      // is a normal outcome to report, not an error to throw on.
+      await fbp.FlutterBluePlus.turnOn().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    } catch (e) {
+      // Declined, or the platform refused. `warning`, not `error`: `error` logs
+      // at fatal level, and a user who says no to a Bluetooth dialog has not hit
+      // a fatal condition — the app degrades and says why.
+      _log.warning('ble', 'could not turn the radio on', e);
+    }
+
+    // Re-read rather than trusting the call: the adapterState stream may not have
+    // emitted yet, and acting on a stale value is what produces "it says ready
+    // but nothing scans".
+    _adapterState = fbp.FlutterBluePlus.adapterStateNow;
+    _adapterController.add(adapterStatus);
+    return adapterStatus.isUsable;
+  }
+
+  @override
   Stream<BlePeripheralInfo> scan({
     Duration timeout = const Duration(seconds: 10),
     bool requireServiceUuid = true,
