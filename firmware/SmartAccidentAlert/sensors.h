@@ -384,6 +384,19 @@ class SensorPipeline {
   void clearSw420Edges() { sw_.clearEdges(); }
 
   // --- telemetry / STATUS / OLED ---------------------------------------
+  /// The three *raw*, unfiltered axes of the most recent sample, milli-g.
+  ///
+  /// Kept separately from the filtered values above because the live display
+  /// wants to show what the part actually read. The filtered path is the right
+  /// input to the gravity estimate and the speed integrator, and the wrong one to
+  /// look at: it reports roughly 69% of a 40 ms impact peak, so an impact shown
+  /// through it looks like a much smaller event than it was.
+  int32_t rawAxMg() const { return rawAxMg_; }
+  int32_t rawAyMg() const { return rawAyMg_; }
+  int32_t rawAzMg() const { return rawAzMg_; }
+  /// Unfiltered |a| of the most recent sample, milli-g. The live trace plots
+  /// this, and so does the demo trigger, for the same reason.
+  int32_t rawMagMg() const { return rawMagMg_; }
   int32_t gravityX() const { return grav_.gx(); }
   int32_t gravityY() const { return grav_.gy(); }
   int32_t gravityZ() const { return grav_.gz(); }
@@ -401,6 +414,12 @@ class SensorPipeline {
   Calibrator calib_;
   int32_t lastMagMg_ = 0;
   int32_t lastFastMag_ = 0;
+  // The live display's inputs. See rawAxMg() for why these are not the filtered
+  // values the detector fuses on.
+  int32_t rawAxMg_ = 0;
+  int32_t rawAyMg_ = 0;
+  int32_t rawAzMg_ = 0;
+  int32_t rawMagMg_ = 0;
   uint16_t ffRun_ = 0;      ///< consecutive samples below kFreeFallMg
   uint16_t ffOffRun_ = 0;   ///< consecutive samples above it (hysteresis)
   bool ffLatched_ = false;  ///< see the note in step()
@@ -469,6 +488,14 @@ class Adxl345 {
   bool read(int32_t& axMg, int32_t& ayMg, int32_t& azMg);
   uint32_t errorCount() const { return errors_; }
 
+  /// Consecutive failed reads, reset by the first good one.
+  ///
+  /// This is the signal the fault detector needs and `present()` cannot give it.
+  /// `present()` is fixed at begin() and only ever says "did the part answer
+  /// once at boot", so a cable pulled off a running node left the firmware
+  /// convinced the sensor was fine and the detector scoring silence forever.
+  uint8_t consecutiveFailures() const { return consecFail_; }
+
  private:
   /// Handle to the library driver, declared at global scope above.
   ///
@@ -483,6 +510,7 @@ class Adxl345 {
   /// consecutive reads have returned exactly those.
   int16_t lastX_ = INT16_MIN, lastY_ = INT16_MIN, lastZ_ = INT16_MIN;
   uint8_t frozenRuns_ = 0;
+  uint8_t consecFail_ = 0;
 };
 
 /// Registers the ISR that latches SW-420 edges. The handler only stores a level

@@ -220,6 +220,10 @@ void SensorPipeline::reset() {
   calib_.reset();
   lastMagMg_ = 0;
   lastFastMag_ = 0;
+  rawAxMg_ = 0;
+  rawAyMg_ = 0;
+  rawAzMg_ = 0;
+  rawMagMg_ = 0;
   ffRun_ = 0;
   ffOffRun_ = 0;
   ffLatched_ = false;
@@ -238,15 +242,24 @@ void SensorPipeline::prime(int32_t axMg, int32_t ayMg, int32_t azMg) {
   grav_.seed(axMg, ayMg, azMg);
   lastMagMg_ = mag3i(axMg, ayMg, azMg);
   lastFastMag_ = lastMagMg_;
+  rawAxMg_ = axMg;
+  rawAyMg_ = ayMg;
+  rawAzMg_ = azMg;
+  rawMagMg_ = lastMagMg_;
   primed_ = true;
 }
 
 int32_t SensorPipeline::accelMg(int16_t raw) {
-  // ADXL345: 13 significant bits left-justified in a 16-bit register, 3.9 mg per
-  // LSB in FULL_RES. The shift strips the padding (and preserves the sign,
-  // because the raw type is signed and the compiler is not allowed to assume
-  // otherwise for a right shift on a negative value -- the explicit cast to
-  // int32_t plus the sign-extension is what makes this defined behaviour).
+  // ADXL345: 13 significant bits left-justified in a 16-bit register, 31.2 mg per
+  // LSB at the +/-16 g range this firmware configures (see
+  // adxlMilliTenthsPerLsb in config.h for the per-range table and for why the
+  // Adafruit library's own scaling cannot be used here).
+  //
+  // The shift strips the padding. It is an arithmetic shift on a signed type, so
+  // the sign is preserved: the explicit cast to int32_t sign-extends first, and
+  // GCC/Clang define >> on negatives that way. A logical shift here would turn
+  // every negative reading into a large positive one, which is precisely the
+  // axis that carries gravity when the node is mounted face-down.
   const int32_t counts = static_cast<int32_t>(raw) >> kAdxlRawShift;
   return (counts * kAdxlMilliTenthsPerLsb) / 10;
 }
@@ -284,6 +297,15 @@ bool SensorPipeline::step(uint32_t nowMs, const RawSample& in, Sample& out) {
   out = Sample{};
   out.tMs = nowMs;
   if (sw) out.flags |= kSfSw420;
+
+  // Latched for the live display. Deliberately before the fault branch below:
+  // when the sensor stops answering, the display should freeze on the last real
+  // reading and the SENSOR flag should light, which together say "this is stale"
+  // rather than "this is a still car".
+  rawAxMg_ = in.axMg;
+  rawAyMg_ = in.ayMg;
+  rawAzMg_ = in.azMg;
+  rawMagMg_ = mag3i(in.axMg, in.ayMg, in.azMg);
 
   if (!in.sensorOk) {
     // A fault is not a quiet vehicle. Report the fault with kSfSensorOk clear so
@@ -457,8 +479,9 @@ bool Adxl345::begin(uint8_t addr) {
     return false;
   }
 
-  // setRange() also sets FULL_RES, which pins the scale at 3.9 mg/LSB on every
-  // range -- that is what makes accelMg() a pure shift-and-multiply.
+  // setRange() also sets FULL_RES, which holds the output at 13 bits / 1024
+  // counts on every range. It does NOT fix the mg/LSB -- that follows the range,
+  // which is why accelMg() scales by adxlMilliTenthsPerLsb(kAdxlRange16G).
   dev_->setRange(static_cast<range_t>(kAdxlRange16G));
   dev_->setDataRate(static_cast<dataRate_t>(kAdxlOdr));
   // The datasheet asks for 100 ms between power-on and the first valid sample.
@@ -471,7 +494,12 @@ bool Adxl345::begin(uint8_t addr) {
 }
 
 bool Adxl345::read(int32_t& axMg, int32_t& ayMg, int32_t& azMg) {
-  if (dev_ == nullptr || !present_) return false;
+  if (dev_ == nullptr || !present_) {
+    // A part that never came up is failing on every tick, and the caller needs
+    // to be able to see that from the *runtime* state, not only from begin().
+    if (consecFail_ < 255) consecFail_++;
+    return false;
+  }
 
   // The part's data registers do not auto-increment on a read, so each axis is
   // its own 2-byte transaction. That is three short transactions per tick; at
@@ -493,6 +521,7 @@ bool Adxl345::read(int32_t& axMg, int32_t& ayMg, int32_t& azMg) {
     if (++frozenRuns_ >= kAdxlFrozenRuns) {
       errors_++;
       frozenRuns_ = 0;
+      if (consecFail_ < 255) consecFail_++;
       return false;
     }
   } else {
@@ -501,6 +530,11 @@ bool Adxl345::read(int32_t& axMg, int32_t& ayMg, int32_t& azMg) {
   lastX_ = rawX;
   lastY_ = rawY;
   lastZ_ = rawZ;
+
+  // A good read clears the failure run, so the counter describes a *streak* and
+  // not a total. The fault detector in sysTask wants "is it broken right now",
+  // and a cumulative count would latch a fault permanently after one bad cable.
+  consecFail_ = 0;
 
   axMg = SensorPipeline::accelMg(rawX);
   ayMg = SensorPipeline::accelMg(rawY);
