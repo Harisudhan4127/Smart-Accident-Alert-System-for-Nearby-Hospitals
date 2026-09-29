@@ -44,8 +44,8 @@ void Power::begin() {
   deepArmed_ = false;
 }
 
-void Power::feed(uint8_t taskId) {
-  if (taskId >= kTaskSlots) return;
+void Power::feed(WdTask taskId) {
+  if (static_cast<uint8_t>(taskId) >= kTaskSlots) return;
   fedAtMs_[taskId] = millis();
   fed_[taskId] = true;
 }
@@ -58,10 +58,24 @@ bool Power::allTasksHealthy(uint32_t nowMs) const {
   return true;
 }
 
+bool Power::criticalTasksHealthy(uint32_t nowMs) const {
+  for (uint8_t i = 0; i < kTaskSlots; i++) {
+    if (!kWatchdogCritical(static_cast<WdTask>(i))) continue;
+    if (!fed_[i]) continue;  // a task that has never run cannot be late
+    if (nowMs - fedAtMs_[i] > static_cast<uint32_t>(kWatchdogTimeoutS) * 1000u) return false;
+  }
+  return true;
+}
+
 bool Power::checkWatchdog(uint32_t nowMs) {
-  if (allTasksHealthy(nowMs)) return false;
-  // A single starved task is a real fault. Records survive a soft reset through
-  // RTC_NOINIT_ATTR, so DIAG can tell the user their node has been resetting.
+  if (criticalTasksHealthy(nowMs)) return false;
+  // A starved sensor or detect task means a crash would go unnoticed, and a
+  // fresh boot is the only way to get a known-good pipeline. Records survive a
+  // soft reset through RTC_NOINIT_ATTR, so DIAG can tell the user their node has
+  // been resetting — which is how the bug this comment replaced was found.
+  //
+  // A starved UI or BLE task is reported through allTasksHealthy() and shows up
+  // in DIAG, but does not restart the chip: see kWatchdogCritical().
 #if defined(ARDUINO)
   noteWatchdogReset();
   ESP.restart();
@@ -96,6 +110,7 @@ SleepVerdict Power::armDeepSleep(uint32_t delayMs, bool armed, bool charging, ui
   // that misses the crash it was installed to catch is the worst possible
   // failure, so the guard is unconditional: no config, no command, no
   // combination of them, gets past this line.
+  (void)delayMs;  // only read by the ESP-IDF call below; see serviceLightSleep
   if (armed) return kSleepBusyDisarmed;
   const SleepVerdict v = mayLightSleep(false, state, armed, charging, eventPending);
   if (v != kSleepOk) return v;
@@ -108,7 +123,6 @@ SleepVerdict Power::armDeepSleep(uint32_t delayMs, bool armed, bool charging, ui
   esp_sleep_enable_ext1_wakeup(1ULL << kPinSw420, ESP_EXT1_WAKEUP_ANY_HIGH);
   esp_sleep_enable_timer_wakeup(delayMs * 1000ULL);
   deepArmed_ = true;
-  (void)0;
 #endif
   return kSleepOk;
 }
@@ -116,6 +130,11 @@ SleepVerdict Power::armDeepSleep(uint32_t delayMs, bool armed, bool charging, ui
 SleepVerdict Power::serviceLightSleep(uint32_t nowMs, bool bleConnected, uint8_t state, bool armed,
                                       bool charging, bool eventPending, uint32_t maxSleepMs) {
   (void)nowMs;
+  // `maxSleepMs` is only read by the ESP-IDF call in the Arduino-only block
+  // below, so on a host build it is genuinely unused and -Werror fails. Saying so
+  // once here beats sprinkling (void) casts through the signature: the parameter
+  // is part of the interface, not dead code.
+  (void)maxSleepMs;
   const SleepVerdict v = mayLightSleep(bleConnected, state, armed, charging, eventPending);
   if (v != kSleepOk) return v;
 #if defined(ARDUINO) && SAAS_ENABLE_LIGHT_SLEEP
