@@ -152,10 +152,78 @@ make firmware-upload PORT=/dev/ttyUSB0
 make monitor          # 115200 baud
 ```
 
-The OLED should show `ACTIVE`, and the serial monitor prints a `HELLO_ACK` once
-the phone connects.
+The OLED draws **live sensor data** straight away — the run mode, the three raw
+axes in g, |a|, the detector score, the SW-420 level — with a rolling |a| trace
+along the bottom. The serial monitor prints the same numbers at 5 lines/s, and a
+`HELLO_ACK` once the phone connects.
 
-### 2. Run the app
+```
+ADXL345  NORM
+X 0.00 Y 0.94 Z 0.32
+|a| 1.00g SW0 S0
+C3.0g up12s q0 c1
+[------------ sparkline ------------]
+```
+
+**A still node reads about 1 g on one axis** — whichever one the mount puts
+gravity on — and the trace's ceiling (`C3.0g`) is printed because the trace is
+auto-scaled and an axis whose units you cannot see is a decoration. If |a| is near
+0.1 g, the part is not powered; DIAGNOSTIC mode is the tool for that, and the
+serial monitor prints it in full. See
+[`firmware/README.md`](firmware/README.md) for a field-by-field guide to every
+line the node prints and every constant you can change.
+
+### 2. Three modes, one button
+
+**Click** the SOS button to cycle `NORMAL` → `DEMO` → `DIAGNOSTIC` → `NORMAL`.
+**Hold** it for 800 ms to send a manual SOS.
+
+| Mode | What it does | Raises events? |
+|---|---|---|
+| `NORMAL` | the real detector | yes — the only mode that does |
+| `DEMO` | shake it and a real `ACCIDENT_DETECTED` goes out through the real state machine and BLE | yes, simulated |
+| `DIAGNOSTIC` | per-sensor health verdict on screen: `ADXLOK SW?? BUSOK`, plus what to do about it | **never** |
+
+**`NORMAL` is the default on every boot, and it stays that way.** A demo event is
+byte-for-byte identical to a real one, so the node never enters DEMO on its own:
+a bench session must not be able to leave a car raising simulated alerts.
+
+**`DEMO` needs both sensors to agree** — |a| above 1.0 g *and* the SW-420, on the
+same sample for 60 ms. An earlier version let the accelerometer fire alone, which
+meant a demo could pass on a node with the vibration switch disconnected.
+
+To see the whole accident path without a car — detector, state machine, event
+queue, BLE, app — **click the SOS button** (a press shorter than 800 ms), or send
+`COMMAND {"op":"MODE","mode":"DEMO"}`. The screen takes over with an animated
+`DEMO — shake = simulated` banner, then returns to the live view at 10 Hz. Now
+**shake the node**:
+
+- |a| spikes on the trace, the score climbs, `R` counts to 3
+- the buzzer chirps, the red LED lights, the state goes `PENDING`
+- a real `ACCIDENT_DETECTED` is queued and sent over BLE
+
+Click again to go back. A power cycle returns to `NORMAL` regardless.
+
+```
+ADXL345  DEMO
+X 0.05 Y 1.21 Z 0.33
+|a| 1.25g SW1 S87
+C4.2g up31s q0 c1
+[--|########|-----]
+```
+
+`SW1` lit up and the bar spiked: both sensors agreed, so the trigger fired. Hold
+the button instead and you get a manual SOS, so the two gestures are
+distinguishable by feel and by the screen.
+
+**A DEMO node cannot be relied on to detect anything.** In DEMO the production
+speed gate and thresholds do not apply to the simulated trigger — it fires from
+magnitude and the SW-420 alone, so that it works on a desk where nobody can
+reach 5 km/h or 3 g. See
+[`docs/02-ble-protocol.md` §6.7](docs/02-ble-protocol.md) and
+`firmware/README.md`.
+
+### 3. Run the app
 
 ```bash
 make pub
@@ -165,7 +233,7 @@ make app
 Pair the node (it is filtered by service UUID, so only compatible nodes appear),
 add one emergency contact, and you are set.
 
-### 3. Optional — the cloud backend
+### 4. Optional — the cloud backend
 
 The app is **fully functional offline**. The backend is only needed for
 cross-device history and a shared hospital directory.
@@ -315,15 +383,17 @@ Reproduce the last two with `make test-protocol`; the first with
 ## Testing
 
 ```bash
-make test              # everything
-make test-protocol     # wire-format conformance (no hardware needed)
-make test-app          # Flutter unit + widget tests
-make verify            # what CI runs
+make test                # everything
+make test-protocol       # wire-format conformance (no hardware needed)
+make test-firmware-host  # firmware host-side unit tests (no hardware needed)
+make test-app            # Flutter unit + widget tests
+make verify              # what CI runs
 ```
 
 | Suite | Count | Covers |
 |---|---|---|
 | `tools/protocol/test/` | 138 | CRC check values, every golden vector, every **split point** of every frame, corrupt lengths, bad CRCs, 10 k-frame throughput |
+| `firmware/test/` | 159 | The DEMO trigger (dead sensor, fault mid-shake, cooldown); the ADXL345 scale (1 g is 1 g, full scale, sign symmetry); the task watchdog (every slot feeds itself, only sensor/detect/sys/watchdog may restart the chip) |
 | `app/test/protocol/` | conformance | The Dart codec against the same golden vectors — a protocol change that breaks one side fails CI |
 | `app/test/data/` | index | The spatial index against a **brute-force O(N) reference** over real seed coordinates |
 
@@ -348,6 +418,7 @@ you are:
 | Assembling the demo | [01-system-architecture](docs/01-system-architecture.md) → [03-hardware-and-wiring](docs/03-hardware-and-wiring.md) → [quick start](#quick-start) |
 | Reviewing the code | [01](docs/01-system-architecture.md) → [02-ble-protocol](docs/02-ble-protocol.md) → [06-accident-detection](docs/06-accident-detection.md) |
 | Extending it | [02-ble-protocol](docs/02-ble-protocol.md) (the contract) → [04-firestore-schema](docs/04-firestore-schema.md) → [05-hospital-search](docs/05-hospital-search.md) |
+| Answering "why does it want my location?" | [14-permissions](docs/14-permissions.md) |
 | Debugging at 2 a.m. | [07-memory-and-power](docs/07-memory-and-power.md) → the DIAG counters in the app's Settings screen |
 
 ---

@@ -9,6 +9,327 @@ accelerometer, and no rotation rate is measured or inferred anywhere in this
 firmware. Rotation shows up only as a change in the direction of gravity. See
 `docs/06-accident-detection.md` for what that costs.
 
+## Seeing it work
+
+The node draws its **live sensor data on the OLED** at all times: five rows of
+label-above-value, then a rolling |a| trace.
+
+```
+NORMAL / DEMO
+ADXL345  NORM
+X 0.00 Y 0.94 Z 0.32
+|a| 1.00g SW0 S0
+C3.0g up12s q0 c1
+[------------ sparkline ------------]
+```
+
+| Row | What it is |
+| --- | --- |
+| `ADXL345  NORM` | which part is on the bus, and the current mode |
+| `X … Y … Z` | the three **raw**, unfiltered axes in g |
+| `|a| … SW … S` | unfiltered magnitude, the SW-420 level, the live detector score 0…100 |
+| `C3.0g up… q… c…` | the trace's vertical ceiling, uptime, BLE queue depth, connected centrals |
+| the bars | the last 2.56 s of \|a\|, oldest at the left |
+
+**The axes are unfiltered on purpose.** The 5 Hz section that feeds the gravity
+estimate reports about 69% of a real 40 ms impact peak, so a crash seen through
+it looks like a mild bump. This is the "what is the part actually reading" view.
+
+**`C3.0g` is the trace's ceiling**, and it is on screen because the trace is
+auto-scaled. An axis whose units you cannot see is a decoration, not a
+measurement. It grows to the largest magnitude seen this session and never
+shrinks, so the bars do not twitch while you watch, and 20 g is a hard cap so one
+absurd reading cannot squash the rest of the trace flat.
+
+**A still node reads about 1 g on one axis**, whichever one the mount puts gravity
+on. Near 0.1 g means the part is not powered — see DIAGNOSTIC below, which exists
+for exactly that.
+
+## The three run modes
+
+The mode is the first line of the display and is printed on every serial line,
+because a demo and a real crash are the same event on the wire.
+
+| Mode | What it does | Raises events? |
+| --- | --- | --- |
+| `NORMAL` | the real detector, nothing simulated | yes — the only mode that does |
+| `DEMO` | **shake the node** and it raises a real `ACCIDENT_DETECTED` through the real state machine and the real BLE stack | yes, simulated |
+| `DIAGNOSTIC` | per-sensor health check with an on-screen verdict | **never** |
+
+**`NORMAL` is the default on every boot, and it stays that way.** A node that
+remembered DEMO across a power cycle could leave a car raising simulated alerts.
+There is no persistence: the mode is reset on every power cycle, on purpose.
+
+**`DEMO` needs both sensors to agree.** |a| at or above 1.0 g *and* the SW-420
+asserted, on the same sample, for 3 consecutive samples (60 ms). An earlier
+revision let the accelerometer fire on its own with the switch as a shortcut,
+which meant a demo could pass on a node with the vibration switch disconnected —
+exercising half the hardware and proving nothing about the other half. The SW-420
+is the only input with a failure mode the accelerometer does not have.
+
+`DEMO` and `DIAGNOSTIC` both disarm the production detector. A bench node must
+not page anyone from a road joint, and a health check that raises accidents is
+not a health check.
+
+**`DIAGNOSTIC` answers three questions with three two-character verdicts:**
+
+```
+ADXL345  DIAG
+X 0.00 Y 0.94 Z 0.32
+|a| 1.00g SW0 S0
+ADXLOK SW?? BUSOK
+tap the SW-420
+[------------ sparkline ------------]
+```
+
+| Verdict | Meaning |
+| --- | --- |
+| `OK` | observed behaving correctly |
+| `??` | present and answering, but **not yet proven** |
+| `XX` | present and provably wrong |
+| `--` | no evidence yet — right after entering the mode |
+
+The middle row of the display says what to *do* about a `??`, because "SW ??" on
+its own is a dead end:
+
+| Shown | What it means and what to do |
+| --- | --- |
+| `tap the SW-420` | the switch has never asserted. It is wired, it is debounced, it has simply never been asked. Tap it. |
+| `shake the node` | gravity seen, but \|a\| has never moved. Pick the node up. |
+| `fix accel wiring` | no gravity for 3 s. Check `VS` (3.3 V) and GND. |
+| `all sensors OK` | everything proven working. |
+
+Two of these are the cases that cost the most bench time, and **neither is
+visible to a firmware that only counts I2C errors**:
+
+* **A part that answers I2C but is not powered.** Some ADXL345 breakouts hold the
+  bus up from the regulator's standby rail with `VS` unconnected, so `DEVID` reads
+  `0xE5` and the part looks present. The data registers read nothing, and |a| sits
+  at 0.1 g. The only honest evidence is a gravity test.
+* **A bus that has gone open.** Every read "succeeds" and the value never
+  changes, so a bus-error count stays at zero. What gives it away is that |a| is
+  *constant*: a real accelerometer on a desk jitters by tens of milli-g. Note
+  that a constant 1 g is also a valid gravity reading, which is why the
+  accelerometer verdict checks gravity and motion separately.
+
+## Reading the serial monitor
+
+```bash
+make monitor      # 115200 baud
+```
+
+Everything the node knows is printed here, and this is the authoritative view —
+the OLED is a summary and the serial is the record.
+
+### The boot banner
+
+Printed once, always, on every boot:
+
+```
+=== SAAS node boot ===
+  accelerometer : found  addr=0x53  DEVID=0xE5  range=+/-16g  odr=100Hz
+  oled          : found
+  run mode      : NORMAL  (always NORMAL on boot; click SOS to toggle)
+  boot calib    : 1200ms
+  button        : click = mode, hold 800ms = SOS
+  live |a| and raw axes print below; OLED shows the same
+```
+
+| Field | Read it for |
+| --- | --- |
+| `accelerometer` | `found` or `NOT FOUND`. **`DEVID=0xE5` is necessary but not sufficient** — see DIAGNOSTIC. |
+| `addr` | `0x53` normal, `0x1D` if SDO is tied high. The firmware handles both. |
+| `run mode` | always `NORMAL` on boot. If you expected otherwise, the node rebooted. |
+| `boot calib` | the node refuses to arm until this completes, so the vehicle must be still for 1.2 s after power-up. |
+
+If no accelerometer is found, two extra lines appear telling you what to check —
+`VS` (3.3 V), GND, and SDA/SCL on 21/22.
+
+### The repeating data line
+
+Once every 200 ms (5 lines/s):
+
+```
+NORMAL IDLE   t=   12s X 0.003 Y 0.937 Z-0.344 |a|= 1.000g peak= 1.000g sw=0 sc=  0 n=598
+```
+
+| Field | Meaning | What a healthy value looks like |
+| --- | --- | --- |
+| mode | `NORMAL`, `DEMO` or `DIAG` | — |
+| state | `BOOT` `IDLE` `PENDING` `ALARM` `SOS` `MUTED` `FAULT` | `IDLE`. **`BOOT` for more than ~2 s is a fault** — see below. |
+| `t=` | seconds since boot | rising steadily |
+| `X Y Z` | raw axes in g, **unfiltered** | one of them ≈ **1.0**; the others near 0 |
+| `\|a\|` | raw magnitude in g | **≈ 1.00 when still.** 0.1 means the part is not powered. |
+| `peak` | largest \|a\| this session | rises when you shake it, then holds |
+| `sw` | SW-420 level, 0 or 1 | toggles when you tap the module |
+| `sc` | fused score 0…100 | 0 at rest. Trip is at 70. |
+| `n` | samples since boot | ≈ **50 per second**. If it stops, the sensor task is wedged. |
+
+Two checks worth memorising, because together they tell you whether the node is
+alive, whether the sensor is *powered*, and whether it is *responding*:
+
+* `n` climbing at 50/s and `t=` climbing at 1/s → the node is running.
+* `|a|` ≈ **1.00** → the accelerometer is powered and mounted. This is the single
+  most useful number in the whole output.
+
+### The DEMO line
+
+```
+  DEMO  shake 0/3  hits=0  cooldown=0ms  (needs |a|>=1000mg AND SW-420)
+```
+
+| Field | Meaning |
+| --- | --- |
+| `shake n/3` | samples counted toward the 60 ms hold window. **It only advances while both sensors agree**, so if it sits at 0 you can tell which one is not contributing. |
+| `hits` | simulated accidents raised this session |
+| `cooldown` | time left before the next trigger is allowed (5 s) |
+
+### The DIAGNOSTIC lines
+
+```
+  DIAG  ADXL345 OK       SW-420 UNPROVEN  BUS OK
+        gravity=yes motion=no |a|min=980mg max=1020mg  swEdges=0  readFails=0/0
+```
+
+| Field | Meaning |
+| --- | --- |
+| `gravity` | has \|a\| been inside 500…3000 mg? A still node must say `yes`. |
+| `motion` | has \|a\| moved by more than 150 mg? A real sensor on a desk says `yes`. A `no` with `gravity=yes` is a frozen bus. |
+| `\|a\|min`/`max` | the range seen. **min ≈ max over minutes means the value is frozen.** |
+| `swEdges` | raw SW-420 pin edges, counted *before* debounce. Chatter here is a wiring fault the detector's debounce would hide. |
+| `readFails` | consecutive / worst-ever failed reads. Non-zero means the bus is unhealthy. |
+
+### The fault line
+
+Replaces the data line entirely when the sensor is not usable, so a node that is
+not reading its sensor cannot be mistaken for one idling quietly:
+
+```
+NORMAL FAULT   t=   12s *** SENSOR FAULT *** read failing addr=0x53 id=0xE5 failRuns=31
+        |a|=0.117g  (a still node must read ~1.00g; near 0 means no gravity, i.e. the part is not really powered)
+```
+
+`DIAG.watchdogResets` in the `DIAG` JSON counts reboots and survives a soft reset,
+so it is the number to read if the node seems to restart.
+
+## The parameters
+
+Everything tunable lives in `config.h`, and nothing is tunable at runtime except
+through the protocol (below).
+
+### Pin map and polarity
+
+| Constant | Default | Note |
+| --- | --- | --- |
+| `kPinI2cSda` / `kPinI2cScl` | 21 / 22 | shared by the ADXL345 and the SSD1306 |
+| `kPinSw420` | 27 | **active HIGH** — the module pulls the line *high* when it vibrates |
+| `kPinBuzzer` | 25 | **active LOW**, through an NPN |
+| `kPinSosButton` | 26 | **active LOW** to GND, internal pull-up |
+| `kPinLedGreen` / `kPinLedRed` | 32 / 33 | **active HIGH** |
+| `kPinBatteryAdc` | 34 | input-only, correct for a divider |
+| `kSw420ActiveHigh`, `kBuzzerActiveLow`, … | — | **flipping any of these inverts that input.** The SW-420 is the most dangerous: inverted, the vibration term is silently dead. |
+
+### Sensor
+
+| Constant | Default | Note |
+| --- | --- | --- |
+| `kAdxlAddr` / `kAdxlAddrAlt` | `0x53` / `0x1D` | probed in that order |
+| `kAdxlRange16G` | ±16 g | **changing this changes the scale** — `adxlMilliTenthsPerLsb()` derives the sensitivity from it, so they cannot disagree |
+| `kAdxlOdr` | 100 Hz | 2× the 50 Hz loop, so the part is the anti-aliaser |
+| `kSensorHz` | 50 Hz | **every window, debounce and filter coefficient is computed for 50 Hz.** A 200 Hz build is not a build, it is a different algorithm. |
+| `kSensorFaultFailRuns` | 25 | consecutive failed reads = 0.5 s before `FAULT` |
+
+### Detector
+
+Weights sum to exactly 1000 (`static_assert` enforces it), so the trip threshold
+of 70 means the same thing after any retune.
+
+The three `kCfg…Default` constants are the **power-on defaults**, used until a
+`CONFIG` arrives or an NVS save overrides them. The detector itself reads the
+live `DetectorCfg`; changing the default changes what a freshly-flashed node
+starts with, not what a configured one does.
+
+| Constant | Default | Raise it to… |
+| --- | --- | --- |
+| `kCfgAccelThresholdMgDefault` | 3000 | tolerate a rougher road / car |
+| `kFreeFallMg` / `kFreeFallMs` | 300 mg / 60 ms | — rarely needs changing; the strongest term |
+| `kCfgMinSpeedMilliKmhDefault` | 5000 | ignore low-speed impacts (a parked car being nudged) |
+| `kDetectorRefractoryMs` | 5000 | allow a second, separate impact sooner |
+| `kCfgConfirmWindowSecDefault` | 10 | more time to cancel a false alarm |
+| `kTripScore` / `kReleaseScore` | 70 / 45 | hysteresis; keep the gap or the score chatters |
+| detector weights | see `config.h` `wt::` | — the redistribution notes are there |
+
+### Run mode and demonstration
+
+| Constant | Default | Note |
+| --- | --- | --- |
+| `kRunModeDefault` | `NORMAL` | **do not change this.** A node that boots in DEMO raises simulated alerts about a car that is fine. |
+| `kDemoShakeMagMg` | 1000 | DEMO needs \|a\| above this **and** the SW-420 |
+| `kDemoShakeHoldSamples` | 3 | 60 ms at 50 Hz |
+| `kDemoCooldownMs` | 5000 | without it, continuous shaking fires 50 events/s |
+| `kSosHoldMs` | 800 | below this a press is a mode click, not an SOS |
+| `kRedrawMs` / `kDemoRedrawMs` | 200 / 100 | the OLED is the most expensive thing the node does; a full-frame push is ~25 ms |
+| `kSerialDataMs` | 200 | 5 lines/s |
+| `kDiagGravityMinMg` / `MaxMg` | 500 / 3000 | the plausible-\|a\| window for DIAGNOSTIC |
+| `kDiagMotionMg` | 150 | change in \|a\| that counts as "responding" |
+| `kDiagNoGravityMs` | 3000 | how long gravity may be missing before `XX` |
+
+### Runtime, over BLE
+
+`COMMAND` (see `docs/02-ble-protocol.md` §6.7 for the wire format):
+
+| `op` | Effect |
+| --- | --- |
+| `MODE` | `{"op":"MODE","mode":"NORMAL"\|"DEMO"\|"DIAG"}`, or `{"op":"MODE"}` to query. Replies with the mode **actually in force**. |
+| `CALIBRATE` | re-baseline gravity. **Requires the vehicle to be still.** |
+| `ARM` / `DISARM` | toggle detection |
+| `CONFIRM` / `CANCEL` | the alert window |
+| `MUTE` | `{"op":"MUTE","untilUnixS":…}`; with no expiry, one hour |
+| `FLASH_TEST` | drive all outputs for 1.5 s, for wiring checks |
+| `SELFTEST` | replies with a full `DIAG` document |
+| `RESET_STATS` | clear the peak, the counters and the trace |
+| `TEST` | drive the detector with synthetic data (the app's Test Alert) |
+
+`CONFIG` changes thresholds at runtime: `accelThresholdMg` (1500…16000),
+`vibrationRequired`, `debounceMs` (20…500), `confirmWindowSec` (5…120),
+`minSpeedKmh` (0…60), `detectorGain` (0.5…3.0), `telemetryHz` (5…100),
+`buzzerEnabled`, `ledEnabled`, `muteUntil`, `autoArm`. Out-of-range values are
+**clamped, not rejected**, and the effective values come back in the `STATUS`
+reply — so read them rather than assuming yours took.
+
+## The one button
+
+| Gesture | Meaning |
+| --- | --- |
+| **click** (released under 800 ms) | next mode: `NORMAL` → `DEMO` → `DIAGNOSTIC` → `NORMAL`, with a full-screen animated banner |
+| **hold** (800 ms or more) | manual **SOS** — the same path as the app's alert button |
+
+A three-way cycle rather than a two-way toggle, because the three modes answer
+three different questions and someone holding a node down a cable wants the
+diagnostic one as much as the demo one. It lands back on `NORMAL` after three
+clicks, so a node left on a bench does not need a fourth click to be safe.
+
+The switch is announced by a banner that owns the whole panel for 1.2 s: a border
+closing in, the mode name at 2x, and a full inversion on the last frame. A corner
+label that scrolls past is not enough when a demo and a real crash are the same
+event on the wire — the answer to "was that real?" has to be on screen at the
+moment it is asked.
+
+A hold is latched while the button is still down and the release is then
+suppressed, so one gesture can never do both. The 800 ms is deliberate: SOS on
+any press would mean a single accidental touch raises an emergency call about a
+parked car, and mode-switching is a thing you do on purpose and can watch the
+screen to confirm.
+
+`DEMO` is never entered on its own. A node always boots in `NORMAL`, because a
+demo event is byte-for-byte identical to a real one and nobody is going to spot
+the difference on a 64-pixel screen. See
+[`docs/02-ble-protocol.md` §6.7](../docs/02-ble-protocol.md) for the wire form.
+
+The trace is fed from the **sensor** task at the full 50 Hz, not at the display
+rate. An impact peak is about 40 ms wide; sampled at the 10 Hz redraw rate it
+would be caught once in five and drawn as a small bump for what was a 5 g event.
+
 The wire contract is frozen and lives outside this directory:
 
 - `docs/02-ble-protocol.md` — GATT layout, frame format, JSON documents, state
@@ -114,6 +435,26 @@ available in this environment, so that path is unverified.
 The ADXL345 is assumed to be mounted so that the vehicle's forward axis is `+X`.
 The speed integrator depends on that; the accelerometer axes are otherwise
 symmetric.
+
+## Host tests
+
+`demomode.cpp` carries no Arduino dependency, so the DEMO trigger's timing
+logic — the 60 ms hold window, the 5 s cooldown, the sensor-fault guard, the
+"a mode change must not inherit a half-primed shake" rule — is unit-tested on the
+host rather than by shaking a node:
+
+```
+make test-firmware-host
+```
+
+Those paths are not reachable by hand in a useful way. A detached sensor and a
+bus that froze mid-shake are the two cases most worth testing and the two you
+cannot produce on a desk on purpose.
+
+**`firmware/test/` is outside the sketch directory on purpose.** The Arduino build
+compiles and links every `.cpp` in the sketch folder, so a `main()` beside
+`SmartAccidentAlert.ino` would be pulled into the firmware image and fight the
+IDE's own entry point.
 
 ## Tasks
 
